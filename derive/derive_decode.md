@@ -733,7 +733,24 @@ The following variants supported:
    expected in such node
 5. Variant with `skip`, cannot be deserialized and can be in any form
 
-Enum variant names are matches against node names converted into `kebab-case`.
+Enum variant names are matches against node names converted into `kebab-case` by default.
+However a `name` attribute can be specified, like so:
+```rust
+# #[derive(knus::Decode)] struct PrintString {}
+#[derive(knus::Decode)]
+enum Action {
+    #[knus(name="Create")]
+    Create(#[knus(argument)] String),
+
+    #[knus(name="PrintString")]
+    PrintString(PrintString),
+}
+```
+```kdl
+Create "xxx"
+PrintString "yyy" line=2
+```
+
 
 # Container Attributes
 

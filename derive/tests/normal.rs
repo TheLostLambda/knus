@@ -119,7 +119,10 @@ struct FilteredChildren {
 #[derive(knus_derive::Decode, Debug, PartialEq)]
 enum Variant {
     Arg1(Arg1),
+
+    #[knus(name = "prop1_renamed")]
     Prop1(Prop1),
+
     #[knus(skip)]
     #[allow(dead_code)]
     Var3(u32),
@@ -774,14 +777,14 @@ fn parse_enum() {
         })
     );
     assert_eq!(
-        parse::<Variant>(r#"prop1 label="hello""#),
+        parse::<Variant>(r#"prop1_renamed label="hello""#),
         Variant::Prop1(Prop1 {
             label: "hello".into()
         })
     );
     assert_eq!(
         parse_err::<Variant>(r#"something"#),
-        "expected one of `arg1`, `prop1`"
+        "expected one of `arg1`, `prop1_renamed`"
     );
 }
 

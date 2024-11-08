@@ -70,6 +70,7 @@ pub enum Attr {
     Unwrap(FieldAttrs),
     Default(Option<syn::Expr>),
     SpanType(syn::Type),
+    Name(String),
 }
 
 #[derive(Debug, Clone)]
@@ -83,6 +84,7 @@ pub struct FieldAttrs {
 #[derive(Debug, Clone)]
 pub struct VariantAttrs {
     pub skip: bool,
+    pub name: Option<String>,
 }
 
 #[derive(Clone)]
@@ -267,8 +269,11 @@ fn is_bool(ty: &syn::Type) -> bool {
 }
 
 impl Variant {
-    fn new(ident: syn::Ident, _attrs: VariantAttrs, kind: VariantKind) -> syn::Result<Self> {
-        let name = heck::ToKebabCase::to_kebab_case(&ident.unraw().to_string()[..]);
+    fn new(ident: syn::Ident, attrs: VariantAttrs, kind: VariantKind) -> syn::Result<Self> {
+        let name = attrs
+            .name
+            .unwrap_or_else(|| heck::ToKebabCase::to_kebab_case(&ident.unraw().to_string()[..]));
+
         Ok(Variant { ident, name, kind })
     }
 }
@@ -771,7 +776,10 @@ impl FieldAttrs {
 
 impl VariantAttrs {
     fn new() -> VariantAttrs {
-        VariantAttrs { skip: false }
+        VariantAttrs {
+            skip: false,
+            name: None,
+        }
     }
     fn update(&mut self, attrs: impl IntoIterator<Item = (Attr, Span)>) {
         use Attr::*;
@@ -779,6 +787,7 @@ impl VariantAttrs {
         for (attr, span) in attrs {
             match attr {
                 Skip => self.skip = true,
+                Name(name) => self.name = Some(name),
                 _ => emit_error!(span, "not supported on enum variants"),
             }
         }
@@ -911,6 +920,11 @@ impl Attr {
             let _eq: syn::Token![=] = input.parse()?;
             let ty: syn::Type = input.parse()?;
             Ok(Attr::SpanType(ty))
+        } else if lookahead.peek(kw::name) {
+            let _kw: kw::name = input.parse()?;
+            let _eq: syn::Token![=] = input.parse()?;
+            let name_lit: syn::LitStr = input.parse()?;
+            Ok(Attr::Name(name_lit.value()))
         } else {
             Err(lookahead.error())
         }
