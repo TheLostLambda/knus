@@ -37,7 +37,7 @@ pub enum FieldMode {
     Arguments,
     Properties,
     Children { name: Option<String> },
-    Child,
+    Child { name: Option<String> },
     Flatten(Flatten),
     Span,
     NodeName,
@@ -474,7 +474,7 @@ impl StructBuilder {
                         .unwrap_or(DecodeMode::Normal),
                 });
             }
-            Some(FieldMode::Child) => {
+            Some(FieldMode::Child { name }) => {
                 attrs.no_decode("children");
                 if let Some(prev) = &self.var_children {
                     return Err(err_pair(
@@ -485,9 +485,9 @@ impl StructBuilder {
                     ));
                 }
                 let name = match &field.attr {
-                    AttrAccess::Named(n) => {
+                    AttrAccess::Named(n) => name.clone().unwrap_or_else(|| {
                         heck::ToKebabCase::to_kebab_case(&n.unraw().to_string()[..])
-                    }
+                    }),
                     AttrAccess::Indexed(_) => {
                         return Err(syn::Error::new(
                             field.span,
@@ -826,44 +826,19 @@ impl Attr {
             Ok(Attr::FieldMode(FieldMode::Arguments))
         } else if lookahead.peek(kw::property) {
             let _kw: kw::property = input.parse()?;
-            let mut name = None;
-            if !input.is_empty() && !input.lookahead1().peek(syn::Token![,]) {
-                let parens;
-                syn::parenthesized!(parens in input);
-                let lookahead = parens.lookahead1();
-                if lookahead.peek(kw::name) {
-                    let _kw: kw::name = parens.parse()?;
-                    let _eq: syn::Token![=] = parens.parse()?;
-                    let name_lit: syn::LitStr = parens.parse()?;
-                    name = Some(name_lit.value());
-                } else {
-                    return Err(lookahead.error());
-                }
-            }
+            let name = parse_name_in_parens(input)?;
             Ok(Attr::FieldMode(FieldMode::Property { name }))
         } else if lookahead.peek(kw::properties) {
             let _kw: kw::properties = input.parse()?;
             Ok(Attr::FieldMode(FieldMode::Properties))
         } else if lookahead.peek(kw::children) {
             let _kw: kw::children = input.parse()?;
-            let mut name = None;
-            if !input.is_empty() && !input.lookahead1().peek(syn::Token![,]) {
-                let parens;
-                syn::parenthesized!(parens in input);
-                let lookahead = parens.lookahead1();
-                if lookahead.peek(kw::name) {
-                    let _kw: kw::name = parens.parse()?;
-                    let _eq: syn::Token![=] = parens.parse()?;
-                    let name_lit: syn::LitStr = parens.parse()?;
-                    name = Some(name_lit.value());
-                } else {
-                    return Err(lookahead.error());
-                }
-            }
+            let name = parse_name_in_parens(input)?;
             Ok(Attr::FieldMode(FieldMode::Children { name }))
         } else if lookahead.peek(kw::child) {
             let _kw: kw::child = input.parse()?;
-            Ok(Attr::FieldMode(FieldMode::Child))
+            let name = parse_name_in_parens(input)?;
+            Ok(Attr::FieldMode(FieldMode::Child { name }))
         } else if lookahead.peek(kw::unwrap) {
             let _kw: kw::unwrap = input.parse()?;
             let parens;
@@ -929,6 +904,26 @@ impl Attr {
             Err(lookahead.error())
         }
     }
+}
+
+fn parse_name_in_parens(input: &syn::parse::ParseBuffer<'_>) -> Result<Option<String>, syn::Error> {
+    Ok(
+        if !input.is_empty() && !input.lookahead1().peek(syn::Token![,]) {
+            let parens;
+            syn::parenthesized!(parens in input);
+            let lookahead = parens.lookahead1();
+            if lookahead.peek(kw::name) {
+                let _kw: kw::name = parens.parse()?;
+                let _eq: syn::Token![=] = parens.parse()?;
+                let name_lit: syn::LitStr = parens.parse()?;
+                Some(name_lit.value())
+            } else {
+                return Err(lookahead.error());
+            }
+        } else {
+            None
+        },
+    )
 }
 
 impl Parse for FlattenItem {

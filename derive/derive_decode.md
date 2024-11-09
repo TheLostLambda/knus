@@ -329,6 +329,20 @@ Note: we use same node type for `plugin` and `datum` nodes. Generally nodes do
 not match on the actual node names, it's the job of the parent node to sort
 out their children into the right buckets. Also see [Enums](#enums).
 
+Also note that you can specify name for the child node too `child(name="something")`, like so:
+```rust
+#[derive(knus::Decode)]
+struct Version {
+    #[knus(argument)]
+    number: u32
+}
+#[derive(knus::Decode)]
+struct MyNode {
+    #[knus(child(name="ver"))]
+    version: Version,
+}
+```
+
 ## Boolean Child Fields
 
 Sometimes you want to track just the presence of the child in the node.
