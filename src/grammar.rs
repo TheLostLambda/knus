@@ -167,8 +167,7 @@ fn ml_comment<S: Span>() -> impl Parser<char, (), Error = Error<S>> {
 }
 
 fn raw_string<S: Span>() -> impl Parser<char, Box<str>, Error = Error<S>> {
-    just('r')
-        .ignore_then(just('#').repeated().map(|v| v.len()))
+     just('#').repeated().at_least(1).map(|v| v.len())
         .then_ignore(just('"'))
         .then_with(|sharp_num| {
             take_until(just('"').ignore_then(just('#').repeated().exactly(sharp_num).ignored()))
@@ -848,11 +847,11 @@ mod test {
 
     #[test]
     fn parse_raw_str() {
-        assert_eq!(&*parse(string(), r#"r"hello""#).unwrap(), "hello");
-        assert_eq!(&*parse(string(), r##"r#"world"#"##).unwrap(), "world");
-        assert_eq!(&*parse(string(), r##"r#"world"#"##).unwrap(), "world");
+        assert_eq!(&*parse(string(), r#""hello""#).unwrap(), "hello");
+        assert_eq!(&*parse(string(), r##"#"world"#"##).unwrap(), "world");
+        assert_eq!(&*parse(string(), r##"#"world"#"##).unwrap(), "world");
         assert_eq!(
-            &*parse(string(), r####"r###"a\n"##b"###"####).unwrap(),
+            &*parse(string(), r####"###"a\n"##b"###"####).unwrap(),
             "a\\n\"##b"
         );
     }
@@ -985,80 +984,60 @@ mod test {
     #[test]
     fn parse_raw_str_err() {
         err_eq!(
-            parse(string(), r#"r"hello"#),
-            r#"{
-            "message": "error parsing KDL",
-            "severity": "error",
-            "labels": [],
-            "related": [{
-                "message": "unclosed raw string `r\"`",
-                "severity": "error",
-                "filename": "<test>",
-                "labels": [
-                    {"label": "opened here",
-                    "span": {"offset": 0, "length": 2}},
-                    {"label": "expected `\"`",
-                    "span": {"offset": 7, "length": 0}}
-                ],
-                "related": []
-            }]
-        }"#
-        );
-        err_eq!(
-            parse(string(), r###"r#"hello""###),
+            parse(string(), r###"#"hello""###),
             r###"{
             "message": "error parsing KDL",
             "severity": "error",
             "labels": [],
             "related": [{
-                "message": "unclosed raw string `r#\"`",
+                "message": "unclosed raw string `#\"`",
                 "severity": "error",
                 "filename": "<test>",
                 "labels": [
                     {"label": "opened here",
-                    "span": {"offset": 0, "length": 3}},
+                    "span": {"offset": 0, "length": 2}},
                     {"label": "expected `\"#`",
-                    "span": {"offset": 9, "length": 0}}
+                    "span": {"offset": 8, "length": 0}}
                 ],
                 "related": []
             }]
         }"###
         );
         err_eq!(
-            parse(string(), r####"r###"hello"####),
+            parse(string(), r####"###"hello"####),
             r####"{
             "message": "error parsing KDL",
             "severity": "error",
             "labels": [],
             "related": [{
-                "message": "unclosed raw string `r###\"`",
+                "message": "unclosed raw string `###\"`",
                 "severity": "error",
                 "filename": "<test>",
                 "labels": [
                     {"label": "opened here",
-                    "span": {"offset": 0, "length": 5}},
+                    "span": {"offset": 0, "length": 4}},
                     {"label": "expected `\"###`",
-                    "span": {"offset": 10, "length": 0}}
+                    "span": {"offset": 9, "length": 0}}
                 ],
                 "related": []
             }]
         }"####
         );
         err_eq!(
-            parse(string(), r####"r###"hello"#world"####),
+            parse(string(), r####"###"hello"#world"####),
             r####"{
             "message": "error parsing KDL",
             "severity": "error",
             "labels": [],
             "related": [{
-                "message": "unclosed raw string `r###\"`",
+                "message": "unclosed raw string `###\"`",
                 "severity": "error",
                 "filename": "<test>",
                 "labels": [
                     {"label": "opened here",
-                    "span": {"offset": 0, "length": 5}},
+                    "span": {"offset": 0, "length": 4}},
                     {"label": "expected `\"###`",
-                    "span": {"offset": 17, "length": 0}}
+                    "span": {"offset": 16, "length": 0}}
                 ],
                 "related": []
             }]

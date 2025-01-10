@@ -239,7 +239,7 @@ impl fmt::Display for TokenFormat {
             Eoi => write!(f, "end of input"),
             OpenRaw(0) => f.write_str("`r\"`"),
             OpenRaw(n) => {
-                f.write_str("`r")?;
+                f.write_str("`")?;
                 for _ in 0..*n {
                     f.write_char('#')?;
                 }
