@@ -590,7 +590,7 @@ fn nodes<S: Span>() -> impl Parser<char, Vec<SpannedNode<S>>, Error = Error<S>> 
                     .then(spanned(braced_nodes))
                     .or_not(),
             )
-            .then_ignore(node_space().repeated().then(node_terminator()))
+            .then_ignore(node_space().repeated().then(node_terminator().or_not()))
             .map(|(((type_name, node_name), line_items), opt_children)| {
                 let mut node = Node {
                     type_name,
