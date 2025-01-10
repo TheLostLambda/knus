@@ -465,7 +465,7 @@ fn number<S: Span>() -> impl Parser<char, Literal, Error = Error<S>> {
 }
 
 fn literal<S: Span>() -> impl Parser<char, Literal, Error = Error<S>> {
-    choice((string().map(Literal::String), keyword(), number()))
+    choice((ident().map(Literal::String), keyword(), number()))
 }
 
 fn type_name<S: Span>() -> impl Parser<char, TypeName, Error = Error<S>> {
@@ -892,6 +892,7 @@ mod test {
 
     #[test]
     fn parse_str() {
+        //assert_eq!(&*parse(string(), r#"hello"#).unwrap(), "hello");
         assert_eq!(&*parse(string(), r#""hello""#).unwrap(), "hello");
         assert_eq!(&*parse(string(), r#""""#).unwrap(), "");
         assert_eq!(&*parse(string(), r#""hel\"lo""#).unwrap(), "hel\"lo");
@@ -1040,6 +1041,26 @@ mod test {
     }
     #[test]
     fn parse_raw_str_err() {
+        err_eq!(
+            parse(string(), r#"#"hello"#),
+            r##"{
+            "message": "error parsing KDL",
+            "severity": "error",
+            "labels": [],
+            "related": [{
+                "message": "unclosed raw string `#\"`",
+                "severity": "error",
+                "filename": "<test>",
+                "labels": [
+                    {"label": "opened here",
+                    "span": {"offset": 0, "length": 2}},
+                    {"label": "expected `\"#`",
+                    "span": {"offset": 7, "length": 0}}
+                ],
+                "related": []
+            }]
+        }"##
+        );
         err_eq!(
             parse(string(), r###"#"hello""###),
             r###"{
@@ -1522,56 +1543,6 @@ mod test {
                     "span": {"offset": 5, "length": 1}},
                     {"label": "expected `}`",
                     "span": {"offset": 6, "length": 0}}
-                ],
-                "related": []
-            }]
-        }"#
-        );
-        err_eq!(
-            parse(nodes(), "hello world"),
-            r#"{
-            "message": "error parsing KDL",
-            "severity": "error",
-            "labels": [],
-            "related": [{
-                "message": "identifiers cannot be used as arguments",
-                "severity": "error",
-                "filename": "<test>",
-                "labels": [
-                    {"label": "unexpected identifier",
-                    "span": {"offset": 6, "length": 5}}
-                ],
-                "help": "consider enclosing in double quotes \"..\"",
-                "related": []
-            }]
-        }"#
-        );
-
-        err_eq!(
-            parse(nodes(), "hello world {"),
-            r#"{
-            "message": "error parsing KDL",
-            "severity": "error",
-            "labels": [],
-            "related": [{
-                "message": "identifiers cannot be used as arguments",
-                "severity": "error",
-                "filename": "<test>",
-                "labels": [
-                    {"label": "unexpected identifier",
-                    "span": {"offset": 6, "length": 5}}
-                ],
-                "help": "consider enclosing in double quotes \"..\"",
-                "related": []
-            }, {
-                "message": "unclosed curly braces `{`",
-                "severity": "error",
-                "filename": "<test>",
-                "labels": [
-                    {"label": "opened here",
-                    "span": {"offset": 12, "length": 1}},
-                    {"label": "expected `}`",
-                    "span": {"offset": 13, "length": 0}}
                 ],
                 "related": []
             }]
