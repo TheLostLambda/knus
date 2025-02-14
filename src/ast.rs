@@ -168,6 +168,15 @@ pub enum Literal {
     /// String value
     #[cfg_attr(feature = "minicbor", n(4))]
     String(#[cfg_attr(feature = "minicbor", n(0))] Box<str>),
+    /// Not a number
+    #[cfg_attr(feature = "minicbor", n(5))]
+    Nan,
+    /// Infinity
+    #[cfg_attr(feature = "minicbor", n(6))]
+    Inf,
+    /// Negative Infinity
+    #[cfg_attr(feature = "minicbor", n(7))]
+    NegInf,
 }
 
 impl<S> Node<S> {

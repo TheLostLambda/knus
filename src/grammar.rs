@@ -288,22 +288,70 @@ fn bare_ident<S: Span>() -> impl Parser<char, Box<str>, Error = Error<S>> {
     ))
     .map(|v| v.into_iter().collect())
     .try_map(|s: String, span| match &s[..] {
-        "true" => Err(Error::Unexpected {
+        "true" => Err(Error::Message {
+            label: Some("illegal identifier"),
+            span,
+            message: "`true` is not allowed as a bare string".to_string(),
+        }),
+        "false" => Err(Error::Message {
+            label: Some("illegal identifier"),
+            span,
+            message: "`false` is not allowed as a bare string".to_string(),
+        }),
+        "null" => Err(Error::Message {
+            label: Some("illegal identifier"),
+            span,
+            message: "`null` is not allowed as a bare string".to_string(),
+        }),
+        "nan" => Err(Error::Message {
+            label: Some("illegal identifier"),
+            span,
+            message: "`nan` is not allowed as a bare string".to_string(),
+        }),
+        "inf" => Err(Error::Message {
+            label: Some("illegal identifier"),
+            span,
+            message: "`inf` is not allowed as a bare string".to_string(),
+        }),
+        "-inf" => Err(Error::Message {
+            label: Some("illegal identifier"),
+            span,
+            message: "`-inf` is not allowed as a bare string".to_string(),
+        }),
+        "#true" => Err(Error::Unexpected {
             label: Some("keyword"),
             span,
-            found: TokenFormat::Token("true"),
+            found: TokenFormat::Token("#true"),
             expected: expected_kind("identifier"),
         }),
-        "false" => Err(Error::Unexpected {
+        "#false" => Err(Error::Unexpected {
             label: Some("keyword"),
             span,
-            found: TokenFormat::Token("false"),
+            found: TokenFormat::Token("#false"),
             expected: expected_kind("identifier"),
         }),
-        "null" => Err(Error::Unexpected {
+        "#null" => Err(Error::Unexpected {
             label: Some("keyword"),
             span,
-            found: TokenFormat::Token("null"),
+            found: TokenFormat::Token("#null"),
+            expected: expected_kind("identifier"),
+        }),
+        "#nan" => Err(Error::Unexpected {
+            label: Some("keyword"),
+            span,
+            found: TokenFormat::Token("#nan"),
+            expected: expected_kind("identifier"),
+        }),
+        "#inf" => Err(Error::Unexpected {
+            label: Some("keyword"),
+            span,
+            found: TokenFormat::Token("#inf"),
+            expected: expected_kind("identifier"),
+        }),
+        "#-inf" => Err(Error::Unexpected {
+            label: Some("keyword"),
+            span,
+            found: TokenFormat::Token("#-inf"),
             expected: expected_kind("identifier"),
         }),
         _ => Ok(s.into()),
@@ -331,15 +379,24 @@ fn ident<S: Span>() -> impl Parser<char, Box<str>, Error = Error<S>> {
 
 fn keyword<S: Span>() -> impl Parser<char, Literal, Error = Error<S>> {
     choice((
-        just("null")
-            .map_err(|e: Error<S>| e.with_expected_token("null"))
+        just("#null")
+            .map_err(|e: Error<S>| e.with_expected_token("#null"))
             .to(Literal::Null),
-        just("true")
-            .map_err(|e: Error<S>| e.with_expected_token("true"))
+        just("#true")
+            .map_err(|e: Error<S>| e.with_expected_token("#true"))
             .to(Literal::Bool(true)),
-        just("false")
-            .map_err(|e: Error<S>| e.with_expected_token("false"))
+        just("#false")
+            .map_err(|e: Error<S>| e.with_expected_token("#false"))
             .to(Literal::Bool(false)),
+        just("#nan")
+            .map_err(|e: Error<S>| e.with_expected_token("#nan"))
+            .to(Literal::Nan),
+        just("#inf")
+            .map_err(|e: Error<S>| e.with_expected_token("#inf"))
+            .to(Literal::Inf),
+        just("#-inf")
+            .map_err(|e: Error<S>| e.with_expected_token("#-inf"))
+            .to(Literal::NegInf),
     ))
 }
 
@@ -476,7 +533,7 @@ fn prop_or_arg_inner<S: Span>() -> impl Parser<char, PropOrArg<S>, Error = Error
                         };
                         Ok(Prop(name, value))
                     }
-                    (Literal::Bool(_) | Literal::Null, Some(_)) => Err(Error::Unexpected {
+                    (Literal::Bool(_) | Literal::Null | Literal::Nan | Literal::Inf | Literal::NegInf, Some(_)) => Err(Error::Unexpected {
                         label: Some("unexpected keyword"),
                         span: name_span,
                         found: TokenFormat::Kind("keyword"),
@@ -1074,29 +1131,32 @@ mod test {
 
     #[test]
     fn parse_literal() {
-        assert_eq!(parse(literal(), "true").unwrap(), Literal::Bool(true));
-        assert_eq!(parse(literal(), "false").unwrap(), Literal::Bool(false));
-        assert_eq!(parse(literal(), "null").unwrap(), Literal::Null);
+        assert_eq!(parse(literal(), "#true").unwrap(), Literal::Bool(true));
+        assert_eq!(parse(literal(), "#false").unwrap(), Literal::Bool(false));
+        assert_eq!(parse(literal(), "#null").unwrap(), Literal::Null);
+        assert_eq!(parse(literal(), "#nan").unwrap(), Literal::Nan);
+        assert_eq!(parse(literal(), "#inf").unwrap(), Literal::Inf);
+        assert_eq!(parse(literal(), "#-inf").unwrap(), Literal::NegInf);
     }
 
     #[test]
     fn exclude_keywords() {
-        parse(nodes(), "item true").unwrap();
+        parse(nodes(), "item #true").unwrap();
 
         err_eq!(
-            parse(nodes(), "true \"item\""),
+            parse(nodes(), "#true \"item\""),
             r#"{
             "message": "error parsing KDL",
             "severity": "error",
             "labels": [],
             "related": [{
                 "message":
-                    "found `true`, expected identifier",
+                    "found `#true`, expected identifier",
                 "severity": "error",
                 "filename": "<test>",
                 "labels": [
                     {"label": "keyword",
-                    "span": {"offset": 0, "length": 4}}
+                    "span": {"offset": 0, "length": 5}}
                 ],
                 "related": []
             }]
@@ -1104,7 +1164,7 @@ mod test {
         );
 
         err_eq!(
-            parse(nodes(), "item false=true"),
+            parse(nodes(), "item #false=#true"),
             r#"{
             "message": "error parsing KDL",
             "severity": "error",
@@ -1116,7 +1176,7 @@ mod test {
                 "filename": "<test>",
                 "labels": [
                     {"label": "unexpected keyword",
-                    "span": {"offset": 5, "length": 5}}
+                    "span": {"offset": 5, "length": 6}}
                 ],
                 "related": []
             }]
@@ -1138,6 +1198,69 @@ mod test {
                     "span": {"offset": 5, "length": 1}}
                 ],
                 "help": "consider enclosing in double quotes \"..\"",
+                "related": []
+            }]
+        }"#
+        );
+    }
+
+    #[test]
+    fn exclude_bare_keywords() {
+        err_eq!(
+            parse(nodes(), "item true"),
+            r#"{
+            "message": "error parsing KDL",
+            "severity": "error",
+            "labels": [],
+            "related": [{
+                "message":
+                    "`true` is not allowed as a bare string",
+                "severity": "error",
+                "filename": "<test>",
+                "labels": [
+                    {"label": "illegal identifier",
+                    "span": {"offset": 5, "length": 4}}
+                ],
+                "related": []
+            }]
+        }"#
+        );
+
+        err_eq!(
+            parse(nodes(), r#"true "item""#),
+            r#"{
+            "message": "error parsing KDL",
+            "severity": "error",
+            "labels": [],
+            "related": [{
+                "message":
+                    "`true` is not allowed as a bare string",
+                "severity": "error",
+                "filename": "<test>",
+                "labels": [
+                    {"label": "illegal identifier",
+                    "span": {"offset": 0, "length": 4}}
+                ],
+                "related": []
+            }]
+        }"#
+        );
+
+        err_eq!(
+            parse(nodes(), "item false=#true"),
+            r#"{
+            "message": "error parsing KDL",
+            "severity": "error",
+            "labels": [],
+            "related": [{
+                "message":
+                    "`false` is not allowed as a bare string",
+                "severity": "error",
+                "filename": "<test>",
+                "labels": [
+                    {"label": "illegal identifier",
+                    "span": {"offset": 5, "length": 5}}
+                ],
                 "related": []
             }]
         }"#
