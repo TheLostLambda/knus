@@ -387,6 +387,8 @@ impl<S: Span> chumsky::Error<char> for ParseError<S> {
                 dest.extend(expected);
                 self
             }
+            (Message { .. }, _) => self,
+            (_, other @ Message { .. }) => other,
             (_, other) => todo!("{} -> {}", self, other),
         }
     }
