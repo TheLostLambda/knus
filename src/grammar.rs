@@ -48,6 +48,7 @@ fn newline<S: Span>() -> impl Parser<char, (), Error = Error<S>> {
         .ignore_then(just('\n'))
         .or(just('\r')) // Carriage return
         .or(just('\x0C')) // Form feed
+        .or(just('\x0B')) // Vertical tab
         .or(just('\u{0085}')) // Next line
         .or(just('\u{2028}')) // Line separator
         .or(just('\u{2029}')) // Paragraph separator
@@ -205,7 +206,7 @@ fn expected_kind(s: &'static str) -> BTreeSet<TokenFormat> {
 
 fn esc_char<S: Span>() -> impl Parser<char, char, Error = Error<S>> {
     filter_map(|span, c| match c {
-        '"' | '\\' | '/' => Ok(c),
+        '"' | '\\' => Ok(c),
         'b' => Ok('\u{0008}'),
         'f' => Ok('\u{000C}'),
         'n' => Ok('\n'),
