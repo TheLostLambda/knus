@@ -40,6 +40,12 @@ pub enum Kind {
     /// The null value (usually corresponds to `None` in Rust)
     #[default]
     Null,
+    /// Not a number
+    Nan,
+    /// Infinity
+    Inf,
+    /// Negative infinity
+    NegInf,
 }
 
 /// Decodes KDL value as bytes
@@ -208,6 +214,9 @@ impl From<&'_ Literal> for Kind {
             L::String(_) => K::String,
             L::Bool(_) => K::Bool,
             L::Null => K::Null,
+            L::Nan => K::Nan,
+            L::Inf => K::Inf,
+            L::NegInf => K::NegInf,
         }
     }
 }
@@ -224,6 +233,9 @@ impl Kind {
             String => "string",
             Bool => "boolean",
             Null => "null",
+            Nan => "nan",
+            Inf => "inf",
+            NegInf => "-inf",
         }
     }
 }
