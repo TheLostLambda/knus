@@ -60,7 +60,7 @@ fn ws_char<S: Span>() -> impl Parser<char, (), Error = Error<S>> {
         matches!(
             c,
             '\t' | ' ' | '\u{00a0}' | '\u{1680}' | '\u{2000}'
-                ..='\u{200A}' | '\u{202F}' | '\u{205F}' | '\u{3000}' | '\u{FEFF}'
+                ..='\u{200A}' | '\u{202F}' | '\u{205F}' | '\u{3000}'
         )
     })
     .ignored()
@@ -74,7 +74,7 @@ fn id_char<S: Span>() -> impl Parser<char, char, Error = Error<S>> {
             // whitespace, excluding 0x20
             '\u{00a0}' | '\u{1680}' |
             '\u{2000}'..='\u{200A}' |
-            '\u{202F}' | '\u{205F}' | '\u{3000}' |
+            '\u{202F}' | '\u{205F}' | '\u{3000}' | '\u{FEFF}' |
             // newline (excluding <= 0x20)
             '\u{0085}' | '\u{2028}' | '\u{2029}'
         )
@@ -91,7 +91,7 @@ fn id_sans_dig<S: Span>() -> impl Parser<char, char, Error = Error<S>> {
             // whitespace, excluding 0x20
             '\u{00a0}' | '\u{1680}' |
             '\u{2000}'..='\u{200A}' |
-            '\u{202F}' | '\u{205F}' | '\u{3000}' |
+            '\u{202F}' | '\u{205F}' | '\u{3000}' | '\u{FEFF}' |
             // newline (excluding <= 0x20)
             '\u{0085}' | '\u{2028}' | '\u{2029}'
         )
@@ -108,7 +108,7 @@ fn id_sans_sign_dig<S: Span>() -> impl Parser<char, char, Error = Error<S>> {
             // whitespace, excluding 0x20
             '\u{00a0}' | '\u{1680}' |
             '\u{2000}'..='\u{200A}' |
-            '\u{202F}' | '\u{205F}' | '\u{3000}' |
+            '\u{202F}' | '\u{205F}' | '\u{3000}' | '\u{FEFF}' |
             // newline (excluding <= 0x20)
             '\u{0085}' | '\u{2028}' | '\u{2029}'
         )
