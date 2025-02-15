@@ -212,11 +212,12 @@ fn esc_char<S: Span>() -> impl Parser<char, char, Error = Error<S>> {
         'n' => Ok('\n'),
         'r' => Ok('\r'),
         't' => Ok('\t'),
+        's' => Ok(' '),
         c => Err(Error::Unexpected {
             label: Some("invalid escape char"),
             span,
             found: c.into(),
-            expected: "\"\\/bfnrt".chars().map(|c| c.into()).collect(),
+            expected: "\"\\bfnrts".chars().map(|c| c.into()).collect(),
         }),
     })
     .or(just('u').ignore_then(
