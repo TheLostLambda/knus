@@ -66,6 +66,8 @@ impl_integer!(i32, I32);
 impl_integer!(u32, U32);
 impl_integer!(i64, I64);
 impl_integer!(u64, U64);
+impl_integer!(i128, I128);
+impl_integer!(u128, U128);
 impl_integer!(isize, Isize);
 impl_integer!(usize, Usize);
 
