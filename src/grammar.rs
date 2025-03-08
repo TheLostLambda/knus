@@ -100,7 +100,24 @@ fn id_sans_dig<S: Span>() -> impl Parser<char, char, Error = Error<S>> {
     .map_err(|e: Error<S>| e.with_expected_kind("letter"))
 }
 
-fn id_sans_sign_dig<S: Span>() -> impl Parser<char, char, Error = Error<S>> {
+fn id_sans_dig_point<S: Span>() -> impl Parser<char, char, Error = Error<S>> {
+    filter(|c| {
+        !matches!(c,
+            '0'..='9' | '.' |
+            '\u{0000}'..='\u{0020}' |
+            '\\'|'/'|'('|')'|'{'|'}'|';'|'['|']'|'='|'"'|'#' |
+            // whitespace, excluding 0x20
+            '\u{00a0}' | '\u{1680}' |
+            '\u{2000}'..='\u{200A}' |
+            '\u{202F}' | '\u{205F}' | '\u{3000}' | '\u{FEFF}' |
+            // newline (excluding <= 0x20)
+            '\u{0085}' | '\u{2028}' | '\u{2029}'
+        )
+    })
+    .map_err(|e: Error<S>| e.with_expected_kind("letter"))
+}
+
+fn id_sans_sign_dig_point<S: Span>() -> impl Parser<char, char, Error = Error<S>> {
     filter(|c| {
         !matches!(c,
             '-'| '+' | '0'..='9' |
@@ -284,41 +301,19 @@ fn escaped_string<S: Span>() -> impl Parser<char, Box<str>, Error = Error<S>> {
 fn bare_ident<S: Span>() -> impl Parser<char, Box<str>, Error = Error<S>> {
     let sign = just('+').or(just('-'));
     choice((
-        sign.chain(id_sans_dig().chain(id_char().repeated())),
-        sign.repeated().exactly(1),
-        id_sans_sign_dig().chain(id_char().repeated()),
+        // unambiguous-ident
+        id_sans_sign_dig_point().chain(id_char().repeated()),
+        // signed-ident
+        sign.chain(id_sans_dig_point().chain(id_char().repeated()).or_not()),
+        // dotted-ident
+        sign.or_not().chain(just('.')).chain(id_sans_dig().chain(id_char().repeated()).or_not()),
     ))
     .map(|v| v.into_iter().collect())
     .try_map(|s: String, span| match &s[..] {
-        "true" => Err(Error::Message {
+        "true" | "false" | "null" | "nan" | "inf" | "-inf" => Err(Error::Message {
             label: Some("illegal identifier"),
             span,
-            message: "`true` is not allowed as a bare string".to_string(),
-        }),
-        "false" => Err(Error::Message {
-            label: Some("illegal identifier"),
-            span,
-            message: "`false` is not allowed as a bare string".to_string(),
-        }),
-        "null" => Err(Error::Message {
-            label: Some("illegal identifier"),
-            span,
-            message: "`null` is not allowed as a bare string".to_string(),
-        }),
-        "nan" => Err(Error::Message {
-            label: Some("illegal identifier"),
-            span,
-            message: "`nan` is not allowed as a bare string".to_string(),
-        }),
-        "inf" => Err(Error::Message {
-            label: Some("illegal identifier"),
-            span,
-            message: "`inf` is not allowed as a bare string".to_string(),
-        }),
-        "-inf" => Err(Error::Message {
-            label: Some("illegal identifier"),
-            span,
-            message: "`-inf` is not allowed as a bare string".to_string(),
+            message: format!("`{s}` is not allowed as a bare string"),
         }),
         "#true" => Err(Error::Unexpected {
             label: Some("keyword"),
@@ -490,7 +485,7 @@ where
 fn esc_line<S: Span>() -> impl Parser<char, (), Error = Error<S>> {
     just('\\')
         .ignore_then(ws().repeated())
-        .ignore_then(comment().or(newline()))
+        .ignore_then(comment().or(newline()).or(end()))
 }
 
 fn node_space<S: Span>() -> impl Parser<char, (), Error = Error<S>> {
@@ -708,7 +703,7 @@ fn nodes<S: Span>() -> impl Parser<char, Vec<SpannedNode<S>>, Error = Error<S>> 
 }
 
 pub(crate) fn document<S: Span>() -> impl Parser<char, Document<S>, Error = Error<S>> {
-    nodes().then_ignore(end()).map(|nodes| Document { nodes })
+    just('\u{FEFF}').or_not().ignore_then(nodes()).then_ignore(end()).map(|nodes| Document { nodes })
 }
 
 #[cfg(test)]
