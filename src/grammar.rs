@@ -56,7 +56,7 @@ fn newline<S: Span>() -> impl Parser<char, (), Error = Error<S>> {
         .map_err(|e: Error<S>| e.with_expected_kind("newline"))
 }
 
-fn ws_char<S: Span>() -> impl Parser<char, (), Error = Error<S>> {
+fn ws_char<S: Span>() -> impl Parser<char, (), Error = Error<S>> + Clone {
     filter(|c| {
         matches!(
             c,
@@ -472,7 +472,10 @@ fn literal<S: Span>() -> impl Parser<char, Literal, Error = Error<S>> {
 
 fn type_name<S: Span>() -> impl Parser<char, TypeName, Error = Error<S>> {
     ident()
-        .delimited_by(just('('), just(')'))
+        .delimited_by(
+            just('(').then(ws_char().repeated()),
+            ws_char().repeated().then(just(')'))
+        )
         .map(TypeName::from_string)
 }
 
@@ -505,7 +508,7 @@ enum PropOrArg<S> {
 }
 
 fn type_name_value<S: Span>() -> impl Parser<char, Value<S>, Error = Error<S>> {
-    spanned(type_name())
+    spanned(type_name().then_ignore(ws_char().repeated()))
         .then(spanned(literal()))
         .map(|(type_name, literal)| Value {
             type_name: Some(type_name),
@@ -524,7 +527,12 @@ fn prop_or_arg_inner<S: Span>() -> impl Parser<char, PropOrArg<S>, Error = Error
     use PropOrArg::*;
     choice((
         spanned(literal())
-            .then(just('=').ignore_then(value()).or_not())
+            .then(
+                ws_char().repeated()
+                    .then(just('='))
+                    .then(ws_char().repeated())
+                    .ignore_then(value()).or_not()
+            )
             .try_map(|(name, value), _| {
                 let name_span = name.span;
                 match (name.value, value) {
@@ -561,7 +569,12 @@ fn prop_or_arg_inner<S: Span>() -> impl Parser<char, PropOrArg<S>, Error = Error
                 }
             }),
         spanned(bare_ident())
-            .then(just('=').ignore_then(value()).or_not())
+            .then(
+                ws_char().repeated()
+                    .then(just('='))
+                    .then(ws_char().repeated())
+                    .ignore_then(value()).or_not()
+            )
             .validate(|(name, value), span, emit| {
                 if value.is_none() {
                     emit(Error::MessageWithHelp {
@@ -627,7 +640,7 @@ fn nodes<S: Span>() -> impl Parser<char, Vec<SpannedNode<S>>, Error = Error<S>> 
                 }
             }));
 
-        let node = spanned(type_name())
+        let node = spanned(type_name().then_ignore(ws_char().repeated()))
             .or_not()
             .then(spanned(ident()))
             .then(
@@ -1303,8 +1316,14 @@ mod test {
             TypeName::from_string("xx_cd$yy".into())
         );
         parse(type_name(), "(1abc)").unwrap_err();
-        parse(type_name(), "( abc)").unwrap_err();
-        parse(type_name(), "(abc )").unwrap_err();
+        assert_eq!(
+            parse(type_name(), "( abc)").unwrap(),
+            TypeName::from_string("abc".into())
+        );
+        assert_eq!(
+            parse(type_name(), "(abc )").unwrap(),
+            TypeName::from_string("abc".into())
+        );
     }
 
     #[test]
@@ -1368,6 +1387,10 @@ mod test {
         assert_eq!(nval.node_name.as_ref(), "other");
         assert_eq!(nval.type_name.as_ref().map(|x| &***x), Some("typ"));
 
+        let nval = single(parse(nodes(), "(typ) \tafter-ws"));
+        assert_eq!(nval.node_name.as_ref(), "after-ws");
+        assert_eq!(nval.type_name.as_ref().map(|x| &***x), Some("typ"));
+
         let nval = single(parse(nodes(), "(\"std::duration\")\"timeout\""));
         assert_eq!(nval.node_name.as_ref(), "timeout");
         assert_eq!(
@@ -1396,6 +1419,14 @@ mod test {
         assert_eq!(nval.properties.len(), 0);
         assert_eq!(&***nval.arguments[0].type_name.as_ref().unwrap(), "string");
         assert_eq!(&*nval.arguments[0].literal, &Literal::String("arg1".into()));
+
+        let nval = single(parse(nodes(), "hello (typ) \t\"after whitespace\""));
+        assert_eq!(nval.node_name.as_ref(), "hello");
+        assert_eq!(nval.type_name.as_ref(), None);
+        assert_eq!(nval.arguments.len(), 1);
+        assert_eq!(nval.properties.len(), 0);
+        assert_eq!(&***nval.arguments[0].type_name.as_ref().unwrap(), "typ");
+        assert_eq!(&*nval.arguments[0].literal, &Literal::String("after whitespace".into()));
 
         let nval = single(parse(nodes(), "hello key=(string)\"arg1\""));
         assert_eq!(nval.node_name.as_ref(), "hello");
@@ -1708,6 +1739,46 @@ mod test {
         assert_eq!(
             &*nval[0].properties.get("--x").unwrap().literal,
             &Literal::Int(Integer(Radix::Dec, "2".into()))
+        );
+    }
+
+    #[test]
+    fn parse_property_ws() {
+        let variants = [
+            "node a =b",
+            "node a= b",
+            "node a     =       b",
+            "node\ta\t=\tb",
+        ];
+        for ea_variant in variants {
+            let nval = parse(nodes(), ea_variant).unwrap();
+            assert_eq!(nval.len(), 1);
+            assert_eq!(nval[0].node_name.as_ref(), "node");
+            assert_eq!(nval[0].arguments.len(), 0);
+            assert_eq!(nval[0].properties.len(), 1);
+            assert_eq!(
+                &*nval[0].properties.get("a").unwrap().literal,
+                &Literal::String("b".into())
+            );
+        }
+
+        err_eq!(
+            parse(nodes(), "node a\\\n=b"),
+            r#"{
+            "message": "error parsing KDL",
+            "severity": "error",
+            "labels": [],
+            "related": [{
+                "message": "found `=`, expected `\"`, `#`, `(`, `+`, `-`, `0`, `;`, `\\`, `{`, `#-inf`, `#false`, `#inf`, `#nan`, `#null`, `#true`, letter, newline, whitespace or end of input",
+                "severity": "error",
+                "filename": "<test>",
+                "labels": [
+                    {"label": "unexpected token",
+                    "span": {"offset": 8, "length": 1}}
+                ],
+                "related": []
+            }]
+        }"#
         );
     }
 }
