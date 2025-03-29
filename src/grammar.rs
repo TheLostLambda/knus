@@ -603,7 +603,7 @@ fn prop_or_arg_inner<S: Span>() -> impl Parser<char, PropOrArg<S>, Error = Error
 
 fn prop_or_arg<S: Span>() -> impl Parser<char, PropOrArg<S>, Error = Error<S>> {
     begin_comment('-')
-        .ignore_then(node_space().repeated())
+        .ignore_then(line_space().repeated())
         .ignore_then(prop_or_arg_inner())
         .map(|_| PropOrArg::Ignore)
         .or(prop_or_arg_inner())
@@ -654,7 +654,7 @@ fn nodes<S: Span>() -> impl Parser<char, Vec<SpannedNode<S>>, Error = Error<S>> 
                     .repeated()
                     .ignore_then(
                         begin_comment('-')
-                            .then_ignore(node_space().repeated())
+                            .then_ignore(line_space().repeated())
                             .or_not(),
                     )
                     .then(spanned(braced_nodes))
@@ -688,7 +688,7 @@ fn nodes<S: Span>() -> impl Parser<char, Vec<SpannedNode<S>>, Error = Error<S>> 
             });
 
         begin_comment('-')
-            .then_ignore(node_space().repeated())
+            .then_ignore(line_space().repeated())
             .or_not()
             .then(spanned(node))
             .separated_by(line_space().repeated())
