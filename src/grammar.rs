@@ -270,8 +270,12 @@ fn esc_char<S: Span>() -> impl Parser<char, char, Error = Error<S>> {
 
 fn escaped_string<S: Span>() -> impl Parser<char, Box<str>, Error = Error<S>> {
     just('"').ignore_then(
-        filter(|&c| c != '"' && c != '\\')
-            .or(just('\\').ignore_then(esc_char()))
+        choice((
+            filter(|&c| c != '"' && c != '\\'),
+            just('\\').ignore_then(esc_char()),
+            // ws-escape
+            just('\\').then(ws_char().or(newline()).repeated().at_least(1)).map(|_| ' '),
+        ))
             .repeated()
             .then_ignore(just('"'))
             .map(|val| val.into_iter().collect::<String>().into())
