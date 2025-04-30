@@ -6,7 +6,7 @@ members = [
 
 [package]
 name = "knus"
-version = "3.2.0"
+version = "3.3.0"
 edition = "2021"
 description = """
     Another KDL language implementation
@@ -16,7 +16,6 @@ keywords = ["kdl", "configuration", "parser"]
 categories = ["parser-implementations", "config", "encoding"]
 homepage = "https://github.com/TheLostLambda/knus"
 documentation = "https://docs.rs/knus"
-rust-version = "1.62.0"
 readme = "README.md"
 
 [dependencies]
