@@ -1,6 +1,14 @@
 A [KDL](https://kdl.dev) file format parser with great error reporting and
 convenient derive macros.
 
+# Repo Maintenance
+
+In brief, I'll be around to review and merge PRs, but I may not have much time to fix issues / write code myself.
+I'm currently working on a successor to `knus` in the form of `facet-kdl` (which will greatly reduce the burden of maintenance by reusing `kdl-rs`s parsing code and `facet`s derive macro).
+
+In the meantime, I'm very happy to take on co-maintainers so that I'm not a single point of failure when it comes to merging PRs.
+That way I can be safely hit by a bus, and the `knus` community can carry on without another fork!
+
 # About KDL
 
 To give you some background on the KDL format. Here is a small example:
