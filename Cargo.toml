@@ -6,7 +6,7 @@ members = [
 
 [package]
 name = "knus"
-version = "3.3.0"
+version = "3.3.1"
 edition = "2024"
 description = """
     Another KDL language implementation
@@ -20,7 +20,7 @@ readme = "README.md"
 
 [dependencies]
 chumsky = { version="0.9.3", default-features=false }
-knus-derive = { path="./derive", version= "^3.2.0", optional=true }
+knus-derive = { path="./derive", version= "3.3.1", optional=true }
 base64 = { version="0.22.1", optional=true }
 unicode-width = { version="0.2.0", optional=true }
 minicbor = { version="0.26.5", optional=true, features=["std", "derive"] }

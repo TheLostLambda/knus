@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-## [3.3.0] - 2025-04-30
+## [3.3.1] - 2025-04-30
 
 ### Added
 
@@ -25,6 +25,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 The beginning of time — this version is identical to [`knuffel` v3.2.0](https://crates.io/crates/knuffel/3.2.0).
 
-[unreleased]: https://github.com/TheLostLambda/knus/compare/v3.3.0...HEAD
-[3.3.0]: https://github.com/TheLostLambda/knus/compare/v3.2.0...v3.3.0
+[unreleased]: https://github.com/TheLostLambda/knus/compare/v3.3.1...HEAD
+[3.3.1]: https://github.com/TheLostLambda/knus/compare/v3.2.0...v3.3.1
 [3.2.0]: https://github.com/TheLostLambda/knus/releases/tag/v3.2.0
