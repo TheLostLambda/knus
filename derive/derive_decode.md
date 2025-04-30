@@ -596,10 +596,10 @@ There are few limitations of the `flatten`:
 3. Only children an properties can be factored out, not arguments in current
    implementation
 4. You must specify which directives can be used in the target structure
-    (i.e. `flatten(child, children, property, properties)`) and if `children`
-    or `properties` are forwarded to the target structure, no more children
-    and property attributes can be used in this structure following the
-    `flatten` attribute.
+   (i.e. `flatten(child, children, property, properties)`) and if `children`
+   or `properties` are forwarded to the target structure, no more children
+   and property attributes can be used in this structure following the
+   `flatten` attribute.
 
 We may lift some of these limitations later.
 
