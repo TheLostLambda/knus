@@ -1,7 +1,7 @@
 use std::fmt;
 
-use knus::span::Span;
 use knus::Decode;
+use knus::span::Span;
 use miette::Diagnostic;
 
 #[derive(knus::DecodeScalar, Debug, PartialEq)]

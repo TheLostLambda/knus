@@ -102,7 +102,7 @@ pub fn emit_enum(e: &Enum) -> syn::Result<TokenStream> {
                 -> ::std::result::Result<#e_name, ::knus::errors::DecodeError<S>>
             {
                 match &**val {
-                    ::knus::ast::Literal::String(ref s) => {
+                    ::knus::ast::Literal::String(s) => {
                         match &s[..] {
                             #(#match_branches,)*
                             _ => {

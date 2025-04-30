@@ -1,7 +1,7 @@
 [package]
 name = "knus-derive"
 version = "3.3.0"
-edition = "2021"
+edition = "2024"
 description = """
     A derive implementation for knus KDL parser
 """

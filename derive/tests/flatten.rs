@@ -3,7 +3,7 @@ use std::fmt;
 use miette::Diagnostic;
 
 use knus::traits::DecodeChildren;
-use knus::{span::Span, Decode};
+use knus::{Decode, span::Span};
 
 #[derive(knus_derive::Decode, Default, Debug, PartialEq)]
 struct Prop1 {

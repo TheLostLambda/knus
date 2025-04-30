@@ -29,7 +29,7 @@ macro_rules! impl_integer {
                 ctx: &mut Context<S>,
             ) -> Result<$typ, DecodeError<S>> {
                 match &**val {
-                    Literal::Int(ref value) => match value.try_into() {
+                    Literal::Int(value) => match value.try_into() {
                         Ok(val) => Ok(val),
                         Err(e) => {
                             ctx.emit_error(DecodeError::conversion(val, e));
@@ -86,7 +86,7 @@ macro_rules! impl_float {
                 ctx: &mut Context<S>,
             ) -> Result<$typ, DecodeError<S>> {
                 match &**val {
-                    Literal::Decimal(ref value) => match value.try_into() {
+                    Literal::Decimal(value) => match value.try_into() {
                         Ok(val) => Ok(val),
                         Err(e) => {
                             ctx.emit_error(DecodeError::conversion(val, e));
@@ -124,7 +124,7 @@ impl<S: ErrorSpan> DecodeScalar<S> for String {
         ctx: &mut Context<S>,
     ) -> Result<String, DecodeError<S>> {
         match &**val {
-            Literal::String(ref s) => Ok(s.clone().into()),
+            Literal::String(s) => Ok(s.clone().into()),
             _ => {
                 ctx.emit_error(DecodeError::scalar_kind(Kind::String, val));
                 Ok(String::new())
@@ -149,7 +149,7 @@ impl<S: ErrorSpan> DecodeScalar<S> for PathBuf {
         ctx: &mut Context<S>,
     ) -> Result<PathBuf, DecodeError<S>> {
         match &**val {
-            Literal::String(ref s) => Ok(String::from(s.clone()).into()),
+            Literal::String(s) => Ok(String::from(s.clone()).into()),
             _ => {
                 ctx.emit_error(DecodeError::scalar_kind(Kind::String, val));
                 Ok(Default::default())
@@ -174,7 +174,7 @@ impl<S: ErrorSpan> DecodeScalar<S> for Arc<Path> {
         ctx: &mut Context<S>,
     ) -> Result<Arc<Path>, DecodeError<S>> {
         match &**val {
-            Literal::String(ref s) => Ok(PathBuf::from(&(**s)[..]).into()),
+            Literal::String(s) => Ok(PathBuf::from(&(**s)[..]).into()),
             _ => {
                 ctx.emit_error(DecodeError::scalar_kind(Kind::String, val));
                 Ok(PathBuf::default().into())
@@ -199,7 +199,7 @@ impl<S: ErrorSpan> DecodeScalar<S> for Arc<str> {
         ctx: &mut Context<S>,
     ) -> Result<Arc<str>, DecodeError<S>> {
         match &**val {
-            Literal::String(ref s) => Ok(s.clone().into()),
+            Literal::String(s) => Ok(s.clone().into()),
             _ => {
                 ctx.emit_error(DecodeError::scalar_kind(Kind::String, val));
                 Ok(String::default().into())

@@ -1,8 +1,8 @@
 use std::fmt;
 use std::mem;
 
-use proc_macro2::{Span, TokenStream};
 use proc_macro_error2::emit_error;
+use proc_macro2::{Span, TokenStream};
 use quote::quote;
 use syn::ext::IdentExt;
 use syn::parse::{Parse, ParseStream};
@@ -798,7 +798,7 @@ fn parse_attr_list(attrs: &[syn::Attribute]) -> Vec<(Attr, Span)> {
     all
 }
 
-fn parse_attrs(input: ParseStream) -> syn::Result<impl IntoIterator<Item = (Attr, Span)>> {
+fn parse_attrs(input: ParseStream) -> syn::Result<impl IntoIterator<Item = (Attr, Span)> + use<>> {
     Punctuated::<_, syn::Token![,]>::parse_terminated_with(input, Attr::parse)
 }
 

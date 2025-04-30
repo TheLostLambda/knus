@@ -7,7 +7,7 @@ mod scalar;
 mod variants;
 
 use definition::Definition;
-use scalar::{emit_scalar, Scalar};
+use scalar::{Scalar, emit_scalar};
 
 fn emit_decoder(def: &Definition) -> syn::Result<TokenStream> {
     match def {

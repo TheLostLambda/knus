@@ -58,7 +58,7 @@ pub fn bytes<S: ErrorSpan>(value: &Value<S>, ctx: &mut Context<S>) -> Vec<u8> {
             Some(&BuiltinType::Base64) => {
                 #[cfg(feature = "base64")]
                 {
-                    use base64::{engine::general_purpose::STANDARD, Engine};
+                    use base64::{Engine, engine::general_purpose::STANDARD};
                     match &*value.literal {
                         Literal::String(s) => match STANDARD.decode(s.as_bytes()) {
                             Ok(vec) => vec,
