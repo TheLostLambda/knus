@@ -59,6 +59,7 @@ pub fn emit_enum(e: &Enum) -> syn::Result<TokenStream> {
 fn decode(e: &Common, node: &syn::Ident) -> syn::Result<TokenStream> {
     let ctx = e.ctx;
     let mut branches = Vec::with_capacity(e.object.variants.len());
+    let mut transparent_variants = Vec::with_capacity(e.object.variants.len());
     let enum_name = &e.object.ident;
     for var in &e.object.variants {
         let name = &var.name;
@@ -94,13 +95,50 @@ fn decode(e: &Common, node: &syn::Ident) -> syn::Result<TokenStream> {
                     }
                 });
             }
-            VariantKind::Nested { option: false } => {
+            VariantKind::Nested {
+                option: None,
+                transparent: false,
+                ..
+            } => {
                 branches.push(quote! {
                     #name => ::knus::Decode::decode_node(#node, #ctx)
                         .map(#enum_name::#variant_name),
                 });
             }
-            VariantKind::Nested { option: true } => {
+            VariantKind::Nested {
+                option: None,
+                transparent: true,
+                inner_ty,
+            } => {
+                // Use the inner type to decode the input, then wrap it inside of the variant
+                transparent_variants.push(quote! {
+                   #inner_ty::decode_node(#node, #ctx).map(#enum_name::#variant_name)
+                });
+            }
+            VariantKind::Nested {
+                option: Some(inner_ty),
+                transparent: true,
+                ..
+            } => {
+                // Use the inner type (inside the option) to decode the input,
+                transparent_variants.push(quote! {
+                    {
+                        if #node.arguments.len() > 0 ||
+                            #node.properties.len() > 0 ||
+                            #node.children.is_some()
+                        {
+                            #inner_ty::decode_node(#node, #ctx).map(Some).map(#enum_name::#variant_name)
+                        } else {
+                            Ok(#enum_name::#variant_name(None))
+                        }
+                    }
+                });
+            }
+            VariantKind::Nested {
+                option: Some(_),
+                transparent: false,
+                ..
+            } => {
                 branches.push(quote! {
                     #name => {
                         if #node.arguments.len() > 0 ||
@@ -155,11 +193,17 @@ fn decode(e: &Common, node: &syn::Ident) -> syn::Result<TokenStream> {
         )
     };
     Ok(quote! {
-        match &**#node.node_name {
-            #(#branches)*
-            name_str => {
-                Err(::knus::errors::DecodeError::conversion(
-                        &#node.node_name, #err))
+        #(
+            if let Ok(parsed) = #transparent_variants {
+                Ok(parsed)
+            } else
+        )* {
+            match &**#node.node_name {
+                #(#branches)*
+                name_str => {
+                    Err(::knus::errors::DecodeError::conversion(
+                            &#node.node_name, #err))
+                }
             }
         }
     })

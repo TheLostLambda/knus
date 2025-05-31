@@ -15,3 +15,4 @@ syn::custom_keyword!(span_type);
 syn::custom_keyword!(str);
 syn::custom_keyword!(type_name);
 syn::custom_keyword!(unwrap);
+syn::custom_keyword!(transparent);

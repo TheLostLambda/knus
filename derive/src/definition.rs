@@ -1,9 +1,14 @@
 use std::fmt;
 use std::mem;
 
+use proc_macro_error2::abort;
 use proc_macro_error2::emit_error;
 use proc_macro2::{Span, TokenStream};
 use quote::quote;
+use syn::GenericArgument;
+use syn::PathArguments;
+use syn::Type;
+use syn::TypePath;
 use syn::ext::IdentExt;
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
@@ -19,9 +24,18 @@ pub enum Definition {
     Enum(Enum),
 }
 
+#[allow(clippy::large_enum_variant)]
 pub enum VariantKind {
     Unit,
-    Nested { option: bool },
+    Nested {
+        /// None: The type is not optional
+        /// Some: Type is optional. Contains value inside the Option<...>
+        option: Option<Type>,
+        /// Delegate the entire parsing to the inner type
+        transparent: bool,
+        /// Type contained within
+        inner_ty: TypePath,
+    },
     Tuple(Struct),
     Named,
 }
@@ -70,6 +84,8 @@ pub enum Attr {
     Unwrap(FieldAttrs),
     Default(Option<syn::Expr>),
     SpanType(syn::Type),
+    /// When applied to newtype enum variants, delegate all parsing to the inner type
+    Transparent,
 }
 
 #[derive(Debug, Clone)]
@@ -83,6 +99,8 @@ pub struct FieldAttrs {
 #[derive(Debug, Clone)]
 pub struct VariantAttrs {
     pub skip: bool,
+    /// Delegate all parsing to the inner type (on newtype enum variants)
+    pub transparent: bool,
 }
 
 #[derive(Clone)]
@@ -166,7 +184,9 @@ pub enum ExtraKind {
 pub struct ExtraField {
     pub field: Field,
     pub kind: ExtraKind,
-    pub option: bool,
+    /// If the type is not Option, is None
+    /// If the type is Option, is Some(inner type)
+    pub option: Option<Type>,
 }
 
 #[derive(Clone)]
@@ -246,17 +266,31 @@ fn err_pair(s1: &Field, s2: &Field, t1: &str, t2: &str) -> syn::Error {
     err
 }
 
-fn is_option(ty: &syn::Type) -> bool {
-    matches!(ty,
-        syn::Type::Path(syn::TypePath {
-            qself: None,
-            path: syn::Path {
-                leading_colon: None,
-                segments,
-            },
-        })
-        if segments.len() == 1 && segments[0].ident == "Option"
-    )
+/// # Returns
+///
+/// If the value is not an option, return `None`
+/// If the value is an option, return `Some(inner type)`
+fn is_option(ty: &syn::Type) -> Option<Type> {
+    if let syn::Type::Path(syn::TypePath {
+        qself: None,
+        path: syn::Path {
+            leading_colon: None,
+            segments,
+        },
+    }) = ty
+    {
+        if let Some(segment) = segments.first() {
+            if segment.ident == "Option" {
+                if let PathArguments::AngleBracketed(args) = &segment.arguments {
+                    if let Some(GenericArgument::Type(ty)) = args.args.first() {
+                        return Some(ty.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    None
 }
 
 fn is_bool(ty: &syn::Type) -> bool {
@@ -298,6 +332,7 @@ impl Enum {
             let kind = match var.fields {
                 syn::Fields::Named(_) => VariantKind::Named,
                 syn::Fields::Unnamed(u) => {
+                    let first_field = u.unnamed.first().cloned();
                     let tup = Struct::new(
                         var.ident.clone(),
                         trait_props.clone(),
@@ -308,11 +343,26 @@ impl Enum {
                         && tup.extra_fields.len() == 1
                         && matches!(tup.extra_fields[0].kind, ExtraKind::Auto)
                     {
+                        let first_field = first_field.expect("len == 1");
+                        let span = first_field.span();
+                        let ty = match first_field.ty {
+                            Type::Path(ty) => ty,
+                            Type::Group(ty) => {
+                                let Type::Path(ty) = *ty.elem else {
+                                    abort!(span, "type must be a path");
+                                };
+                                ty
+                            }
+                            _ => abort!(span, "type must be a path"),
+                        };
+
                         // Single tuple variant without any defition means
                         // the first field inside is meant to be full node
                         // parser.
                         VariantKind::Nested {
-                            option: tup.extra_fields[0].option,
+                            option: tup.extra_fields[0].option.clone(),
+                            transparent: attrs.transparent,
+                            inner_ty: ty,
                         }
                     } else {
                         VariantKind::Tuple(tup)
@@ -371,7 +421,7 @@ impl StructBuilder {
     pub fn add_field(
         &mut self,
         field: Field,
-        is_option: bool,
+        is_option: Option<Type>,
         is_bool: bool,
         attrs: &FieldAttrs,
     ) -> syn::Result<&mut Self> {
@@ -387,14 +437,16 @@ impl StructBuilder {
                 }
                 self.arguments.push(Arg {
                     field,
-                    kind: ArgKind::Value { option: is_option },
+                    kind: ArgKind::Value {
+                        option: is_option.is_some(),
+                    },
                     decode: attrs
                         .decode
                         .as_ref()
                         .map(|(v, _)| v.clone())
                         .unwrap_or(DecodeMode::Normal),
                     default: attrs.default.clone(),
-                    option: is_option,
+                    option: is_option.is_some(),
                 });
             }
             Some(FieldMode::Arguments) => {
@@ -440,7 +492,7 @@ impl StructBuilder {
                 self.properties.push(Prop {
                     field,
                     name,
-                    option: is_option,
+                    option: is_option.is_some(),
                     decode: attrs
                         .decode
                         .as_ref()
@@ -493,7 +545,7 @@ impl StructBuilder {
                 self.children.push(Child {
                     name,
                     field,
-                    option: is_option,
+                    option: is_option.is_some(),
                     mode: if attrs.unwrap.is_none() && is_bool {
                         ChildMode::Bool
                     } else {
@@ -516,7 +568,7 @@ impl StructBuilder {
                 self.children.push(Child {
                     name: name.clone(),
                     field,
-                    option: is_option,
+                    option: is_option.is_some(),
                     mode: ChildMode::Multi,
                     unwrap: attrs.unwrap.clone(),
                     default: attrs.default.clone(),
@@ -538,7 +590,7 @@ impl StructBuilder {
                 });
             }
             Some(FieldMode::Flatten(flatten)) => {
-                if is_option {
+                if is_option.is_some() {
                     return Err(syn::Error::new(
                         field.span,
                         "optional flatten fields are not supported yet",
@@ -558,7 +610,7 @@ impl StructBuilder {
                     self.properties.push(Prop {
                         field: field.clone(),
                         name: "".into(), // irrelevant
-                        option: is_option,
+                        option: is_option.is_some(),
                         decode: DecodeMode::Normal,
                         flatten: true,
                         default: None,
@@ -577,7 +629,7 @@ impl StructBuilder {
                     self.children.push(Child {
                         name: "".into(), // unused
                         field: field.clone(),
-                        option: is_option,
+                        option: is_option.is_some(),
                         mode: ChildMode::Flatten,
                         unwrap: None,
                         default: None,
@@ -596,7 +648,7 @@ impl StructBuilder {
                 attrs.no_decode("type_name");
                 self.type_names.push(TypeNameField {
                     field,
-                    option: is_option,
+                    option: is_option.is_some(),
                 });
             }
             None => {
@@ -771,7 +823,10 @@ impl FieldAttrs {
 
 impl VariantAttrs {
     fn new() -> VariantAttrs {
-        VariantAttrs { skip: false }
+        VariantAttrs {
+            skip: false,
+            transparent: false,
+        }
     }
     fn update(&mut self, attrs: impl IntoIterator<Item = (Attr, Span)>) {
         use Attr::*;
@@ -779,6 +834,7 @@ impl VariantAttrs {
         for (attr, span) in attrs {
             match attr {
                 Skip => self.skip = true,
+                Transparent => self.transparent = true,
                 _ => emit_error!(span, "not supported on enum variants"),
             }
         }
@@ -809,7 +865,10 @@ impl Attr {
     }
     fn _parse(input: ParseStream) -> syn::Result<Self> {
         let lookahead = input.lookahead1();
-        if lookahead.peek(kw::argument) {
+        if lookahead.peek(kw::transparent) {
+            let _kw: kw::transparent = input.parse()?;
+            Ok(Attr::Transparent)
+        } else if lookahead.peek(kw::argument) {
             let _kw: kw::argument = input.parse()?;
             Ok(Attr::FieldMode(FieldMode::Argument))
         } else if lookahead.peek(kw::arguments) {
