@@ -60,6 +60,7 @@ pub enum DecodeMode {
     Normal,
     Str,
     Bytes,
+    With(syn::ExprPath)
 }
 
 #[derive(Debug)]
@@ -872,6 +873,11 @@ impl Attr {
         } else if lookahead.peek(kw::bytes) {
             let _kw: kw::bytes = input.parse()?;
             Ok(Attr::DecodeMode(DecodeMode::Bytes))
+        } else if lookahead.peek(kw::decode_with) {
+            let _kw: kw::decode_with = input.parse()?;
+            let _eq: syn::Token![=] = input.parse()?;
+            let path: syn::ExprPath = input.parse()?;
+            Ok(Attr::DecodeMode(DecodeMode::With(path)))
         } else if lookahead.peek(kw::flatten) {
             let _kw: kw::flatten = input.parse()?;
             let parens;
@@ -987,10 +993,10 @@ impl fmt::Display for DecodeMode {
         use DecodeMode::*;
 
         match self {
-            Normal => "normal",
-            Str => "str",
-            Bytes => "bytes",
+            Normal => "normal".fmt(f),
+            Str => "str".fmt(f),
+            Bytes => "bytes".fmt(f),
+            With(path) => write!(f, "with \"{:?}\"", path)
         }
-        .fmt(f)
     }
 }
