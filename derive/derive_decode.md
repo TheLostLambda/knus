@@ -725,7 +725,11 @@ enum Action {
 
 The following variants supported:
 1. Single element tuple struct without arguments (`PrintString` in example),
-   which forwards node parsing to the inner element.
+   which adds a node called `print-string` and forwards rest of the parsing after to the inner element.
+
+   There is an additional attribute `#[knus(transparent)]` which can be applied to these types of variants.
+   It will fully forward the parsing to the inner element, without requiring a prefix such as `print-string`.
+
 2. Normal `argument`, `arguments`, `properties`, `children` fields (`Create`
    example)
 3. Property fields with names `property(name="xxx")`

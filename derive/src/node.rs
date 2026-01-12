@@ -573,7 +573,7 @@ fn unwrap_fn(
         parent.object.trait_props.clone(),
         parent.object.generics.clone(),
     );
-    bld.add_field(Field::new_named(name), false, false, attrs)?;
+    bld.add_field(Field::new_named(name), None, false, attrs)?;
     let object = bld.build();
     let common = Common {
         object: &object,
