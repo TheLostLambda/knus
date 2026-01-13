@@ -22,7 +22,7 @@ pub enum Definition {
 pub enum VariantKind {
     Unit,
     Nested { option: bool },
-    Tuple(Struct),
+    Tuple(Box<Struct>),
     Named,
 }
 
@@ -315,7 +315,7 @@ impl Enum {
                             option: tup.extra_fields[0].option,
                         }
                     } else {
-                        VariantKind::Tuple(tup)
+                        VariantKind::Tuple(Box::new(tup))
                     }
                 }
                 syn::Fields::Unit => VariantKind::Unit,
