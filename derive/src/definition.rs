@@ -23,7 +23,7 @@ pub enum VariantKind {
     Unit,
     Nested { option: bool },
     Tuple(Struct),
-    Named,
+    Named(Struct),
 }
 
 pub enum ArgKind {
@@ -296,7 +296,15 @@ impl Enum {
                 continue;
             }
             let kind = match var.fields {
-                syn::Fields::Named(_) => VariantKind::Named,
+                syn::Fields::Named(n) => {
+                    let tup = Struct::new(
+                        var.ident.clone(),
+                        trait_props.clone(),
+                        generics.clone(),
+                        n.named.into_iter(),
+                    )?;
+                    VariantKind::Named(tup)
+                }
                 syn::Fields::Unnamed(u) => {
                     let tup = Struct::new(
                         var.ident.clone(),
