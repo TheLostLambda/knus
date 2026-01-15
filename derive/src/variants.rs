@@ -7,7 +7,6 @@ use crate::node;
 pub(crate) struct Common<'a> {
     pub object: &'a Enum,
     pub ctx: &'a syn::Ident,
-    pub span_type: &'a TokenStream,
 }
 
 pub fn emit_enum(e: &Enum) -> syn::Result<TokenStream> {
@@ -17,38 +16,25 @@ pub fn emit_enum(e: &Enum) -> syn::Result<TokenStream> {
 
     let (_, type_gen, _) = e.generics.split_for_impl();
     let mut common_generics = e.generics.clone();
-    let span_ty;
-    if let Some(ty) = e.trait_props.span_type.as_ref() {
-        span_ty = quote!(#ty);
-    } else {
-        if common_generics.params.is_empty() {
-            common_generics.lt_token = Some(Default::default());
-            common_generics.gt_token = Some(Default::default());
-        }
-        common_generics.params.push(syn::parse2(quote!(S)).unwrap());
-        span_ty = quote!(S);
-        common_generics
-            .make_where_clause()
-            .predicates
-            .push(syn::parse2(quote!(S: ::knus::traits::ErrorSpan)).unwrap());
-    };
-    let trait_gen = quote!(<#span_ty>);
+    if common_generics.params.is_empty() {
+        common_generics.lt_token = Some(Default::default());
+        common_generics.gt_token = Some(Default::default());
+    }
     let (impl_gen, _, bounds) = common_generics.split_for_impl();
 
     let common = Common {
         object: e,
         ctx: &ctx,
-        span_type: &span_ty,
     };
 
     let decode = decode(&common, &node)?;
     Ok(quote! {
-        impl #impl_gen ::knus::Decode #trait_gen for #name #type_gen
+        impl #impl_gen ::knus::Decode for #name #type_gen
             #bounds
         {
-            fn decode_node(#node: &::knus::ast::SpannedNode<#span_ty>,
-                           #ctx: &mut ::knus::decode::Context<#span_ty>)
-                -> ::std::result::Result<Self, ::knus::errors::DecodeError<#span_ty>>
+            fn decode_node(#node: &::knus::ast::SpannedNode,
+                           #ctx: &mut ::knus::decode::Context)
+                -> ::std::result::Result<Self, ::knus::errors::DecodeError>
             {
                 #decode
             }
@@ -117,11 +103,7 @@ fn decode(e: &Common, node: &syn::Ident) -> syn::Result<TokenStream> {
                 });
             }
             VariantKind::Tuple(s) => {
-                let common = node::Common {
-                    object: s,
-                    ctx,
-                    span_type: e.span_type,
-                };
+                let common = node::Common { object: s, ctx };
                 let decode = node::decode_enum_item(
                     &common,
                     quote!(#enum_name::#variant_name),
@@ -133,11 +115,7 @@ fn decode(e: &Common, node: &syn::Ident) -> syn::Result<TokenStream> {
                 });
             }
             VariantKind::Named(s) => {
-                let common = node::Common {
-                    object: s,
-                    ctx,
-                    span_type: e.span_type,
-                };
+                let common = node::Common { object: s, ctx };
                 let decode =
                     node::decode_enum_item(&common, quote!(#enum_name::#variant_name), node, true)?;
                 branches.push(quote! {

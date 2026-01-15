@@ -2,7 +2,7 @@ use std::fmt;
 
 use miette::Diagnostic;
 
-use knus::{Decode, span::Span};
+use knus::Decode;
 
 #[derive(Debug, Decode, PartialEq)]
 struct Unit;
@@ -24,13 +24,13 @@ enum Enum {
     Extra(#[knus(argument)] Option<String>, u32),
 }
 
-fn parse<T: Decode<Span>>(text: &str) -> T {
+fn parse<T: Decode>(text: &str) -> T {
     let mut nodes: Vec<T> = knus::parse("<test>", text).unwrap();
     assert_eq!(nodes.len(), 1);
     nodes.remove(0)
 }
 
-fn parse_err<T: Decode<Span> + fmt::Debug>(text: &str) -> String {
+fn parse_err<T: Decode + fmt::Debug>(text: &str) -> String {
     let err = knus::parse::<Vec<T>>("<test>", text).unwrap_err();
     err.related()
         .unwrap()

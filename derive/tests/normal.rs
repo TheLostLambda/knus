@@ -4,8 +4,8 @@ use std::fmt;
 
 use miette::Diagnostic;
 
+use knus::Decode;
 use knus::traits::DecodeChildren;
-use knus::{Decode, span::Span};
 
 #[derive(knus_derive::Decode, Debug, PartialEq)]
 struct Arg1 {
@@ -197,13 +197,13 @@ struct OptBytes {
     data: Option<Vec<u8>>,
 }
 
-fn parse<T: Decode<Span>>(text: &str) -> T {
+fn parse<T: Decode>(text: &str) -> T {
     let mut nodes: Vec<T> = knus::parse("<test>", text).unwrap();
     assert_eq!(nodes.len(), 1);
     nodes.remove(0)
 }
 
-fn parse_err<T: Decode<Span> + fmt::Debug>(text: &str) -> String {
+fn parse_err<T: Decode + fmt::Debug>(text: &str) -> String {
     let err = knus::parse::<Vec<T>>("<test>", text).unwrap_err();
     err.related()
         .unwrap()
@@ -212,11 +212,11 @@ fn parse_err<T: Decode<Span> + fmt::Debug>(text: &str) -> String {
         .join("\n")
 }
 
-fn parse_doc<T: DecodeChildren<Span>>(text: &str) -> T {
+fn parse_doc<T: DecodeChildren>(text: &str) -> T {
     knus::parse("<test>", text).unwrap()
 }
 
-fn parse_doc_err<T: DecodeChildren<Span> + fmt::Debug>(text: &str) -> String {
+fn parse_doc_err<T: DecodeChildren + fmt::Debug>(text: &str) -> String {
     let err = knus::parse::<T>("<test>", text).unwrap_err();
     err.related()
         .unwrap()
