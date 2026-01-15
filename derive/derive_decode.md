@@ -676,10 +676,9 @@ Node name always exists so optional node_name is not supported.
 
 The following definition:
 ```rust
-use knus::span::Span;  // or LineSpan
+use knus::span::Span;
 
 #[derive(knus::Decode)]
-#[knus(span_type=Span)]
 struct Node {
     #[knus(span)]
     span: Span,  // This can be user type decoded from Span
@@ -693,11 +692,8 @@ newline if node ends by a newline, but doesn't include anything after
 semicolon).
 
 The span value might be different than one used for parsing. In this case, it
-should implement [`DecodeSpan`](traits/trait.DecodeSpan.html) trait.
-
-Independenly of whether you use custom span type, or built-in one, you have to
-specify `span_type` for the decoder, since there is no generic implementation
-of the `DecodeSpan` for any type. See [Span Type](#span-type) for more info
+should implement [`DecodeSpan`](traits/trait.DecodeSpan.html) trait. See
+[Span Type](#span-type) for more info
 
 # Enums
 
@@ -739,30 +735,33 @@ Enum variant names are matches against node names converted into `kebab-case`.
 
 ## Span Type
 
-Usually generated implemenation is for any span type:
-```rust,ignore
-impl Decode<S> for MyStruct {
-   # ...
-}
-```
-But if you want to use `span` argument, it's unlikely to be possible to
-implement `DecodeSpan` for any type.
+But if you want to use `span` argument, you need to specify a field
+with the type `knus::span::Span` or provide a custom type that
+implements `DecodeSpan`.
 
-Use use `span_type=` for implemenation of specific type:
 ```rust
-use knus::span::Span;  // or LineSpan
+use knus::decode::Context;
+use knus::span::Span;
+use knus::traits::DecodeSpan;
+
+struct MySpan {
+    start: usize,
+    end: usize,
+}
+
+impl DecodeSpan for MySpan {
+    fn decode_span(span: &Span, _ctx: &mut Context) -> Self {
+        MySpan {
+            start: span.0,
+            end: span.1,
+        }
+    }
+}
 
 #[derive(knus::Decode)]
-#[knus(span_type=Span)]
 struct MyStruct {
     #[knus(span)]
-    span: Span,
-}
-```
-This will generate implementation like this:
-```rust,ignore
-impl Decode<Span> for MyStruct {
-   # ...
+    span: MySpan,
 }
 ```
 
