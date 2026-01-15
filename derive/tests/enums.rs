@@ -1,4 +1,4 @@
-use knus::{Decode, span::Span};
+use knus::Decode;
 
 #[derive(knus_derive::Decode, PartialEq, Debug)]
 enum Test {
@@ -14,7 +14,7 @@ enum Test {
     },
 }
 
-fn parse<T: Decode<Span>>(text: &str) -> T {
+fn parse<T: Decode>(text: &str) -> T {
     let mut nodes: Vec<T> = knus::parse("<test>", text).unwrap();
     assert_eq!(nodes.len(), 1);
     nodes.remove(0)
