@@ -94,12 +94,11 @@ pub fn emit_enum(e: &Enum) -> syn::Result<TokenStream> {
         quote!(#name => Ok(#e_name::#ident))
     });
     Ok(quote! {
-        impl<S: ::knus::traits::ErrorSpan> ::knus::DecodeScalar<S>
-                for #e_name {
+        impl ::knus::DecodeScalar for #e_name {
             fn raw_decode(val: &::knus::span::Spanned<
-                          ::knus::ast::Literal, S>,
-                          ctx: &mut ::knus::decode::Context<S>)
-                -> ::std::result::Result<#e_name, ::knus::errors::DecodeError<S>>
+                          ::knus::ast::Literal>,
+                          ctx: &mut ::knus::decode::Context)
+                -> ::std::result::Result<#e_name, ::knus::errors::DecodeError>
             {
                 match &**val {
                     ::knus::ast::Literal::String(s) => {
@@ -120,8 +119,8 @@ pub fn emit_enum(e: &Enum) -> syn::Result<TokenStream> {
                 }
             }
             fn type_check(type_name: &Option<::knus::span::Spanned<
-                          ::knus::ast::TypeName, S>>,
-                          ctx: &mut ::knus::decode::Context<S>)
+                          ::knus::ast::TypeName>>,
+                          ctx: &mut ::knus::decode::Context)
             {
                 if let Some(typ) = type_name {
                     ctx.emit_error(::knus::errors::DecodeError::TypeName {
