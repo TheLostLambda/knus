@@ -1,5 +1,4 @@
 use std::fmt;
-use std::mem;
 
 use proc_macro_error2::emit_error;
 use proc_macro2::{Span, TokenStream};
@@ -69,7 +68,6 @@ pub enum Attr {
     FieldMode(FieldMode),
     Unwrap(FieldAttrs),
     Default(Option<syn::Expr>),
-    SpanType(syn::Type),
 }
 
 #[derive(Debug, Clone)]
@@ -169,14 +167,8 @@ pub struct ExtraField {
     pub option: bool,
 }
 
-#[derive(Clone)]
-pub struct TraitProps {
-    pub span_type: Option<syn::Type>,
-}
-
 pub struct Struct {
     pub ident: syn::Ident,
-    pub trait_props: TraitProps,
     pub generics: syn::Generics,
     pub spans: Vec<SpanField>,
     pub node_names: Vec<NodeNameField>,
@@ -194,7 +186,6 @@ pub struct Struct {
 
 pub struct StructBuilder {
     pub ident: syn::Ident,
-    pub trait_props: TraitProps,
     pub generics: syn::Generics,
     pub spans: Vec<SpanField>,
     pub node_names: Vec<NodeNameField>,
@@ -220,24 +211,8 @@ pub struct Variant {
 
 pub struct Enum {
     pub ident: syn::Ident,
-    pub trait_props: TraitProps,
     pub generics: syn::Generics,
     pub variants: Vec<Variant>,
-}
-
-impl TraitProps {
-    fn pick_from(attrs: &mut Vec<(Attr, Span)>) -> TraitProps {
-        let mut props = TraitProps { span_type: None };
-        for attr in mem::take(attrs) {
-            match attr.0 {
-                Attr::SpanType(ty) => {
-                    props.span_type = Some(ty);
-                }
-                _ => attrs.push(attr),
-            }
-        }
-        props
-    }
 }
 
 fn err_pair(s1: &Field, s2: &Field, t1: &str, t2: &str) -> syn::Error {
@@ -280,8 +255,7 @@ impl Enum {
         generics: syn::Generics,
         src_variants: impl Iterator<Item = syn::Variant>,
     ) -> syn::Result<Self> {
-        let mut attrs = parse_attr_list(&attrs);
-        let trait_props = TraitProps::pick_from(&mut attrs);
+        let attrs = parse_attr_list(&attrs);
         if !attrs.is_empty() {
             for (_, span) in attrs {
                 emit_error!(span, "unexpected container attribute");
@@ -297,21 +271,13 @@ impl Enum {
             }
             let kind = match var.fields {
                 syn::Fields::Named(n) => {
-                    let tup = Struct::new(
-                        var.ident.clone(),
-                        trait_props.clone(),
-                        generics.clone(),
-                        n.named.into_iter(),
-                    )?;
+                    let tup =
+                        Struct::new(var.ident.clone(), generics.clone(), n.named.into_iter())?;
                     VariantKind::Named(Box::new(tup))
                 }
                 syn::Fields::Unnamed(u) => {
-                    let tup = Struct::new(
-                        var.ident.clone(),
-                        trait_props.clone(),
-                        generics.clone(),
-                        u.unnamed.into_iter(),
-                    )?;
+                    let tup =
+                        Struct::new(var.ident.clone(), generics.clone(), u.unnamed.into_iter())?;
                     if tup.all_fields().len() == 1
                         && tup.extra_fields.len() == 1
                         && matches!(tup.extra_fields[0].kind, ExtraKind::Auto)
@@ -332,7 +298,6 @@ impl Enum {
         }
         Ok(Enum {
             ident,
-            trait_props,
             generics,
             variants,
         })
@@ -340,10 +305,9 @@ impl Enum {
 }
 
 impl StructBuilder {
-    pub fn new(ident: syn::Ident, trait_props: TraitProps, generics: syn::Generics) -> Self {
+    pub fn new(ident: syn::Ident, generics: syn::Generics) -> Self {
         StructBuilder {
             ident,
-            trait_props,
             generics,
             spans: Vec::new(),
             node_names: Vec::new(),
@@ -360,7 +324,6 @@ impl StructBuilder {
     pub fn build(self) -> Struct {
         Struct {
             ident: self.ident,
-            trait_props: self.trait_props,
             generics: self.generics,
             spans: self.spans,
             node_names: self.node_names,
@@ -622,11 +585,10 @@ impl StructBuilder {
 impl Struct {
     fn new(
         ident: syn::Ident,
-        trait_props: TraitProps,
         generics: syn::Generics,
         fields: impl Iterator<Item = syn::Field>,
     ) -> syn::Result<Self> {
-        let mut bld = StructBuilder::new(ident, trait_props, generics);
+        let mut bld = StructBuilder::new(ident, generics);
         for (idx, fld) in fields.enumerate() {
             let mut attrs = FieldAttrs::new();
             attrs.update(parse_attr_list(&fld.attrs));
@@ -663,8 +625,7 @@ impl Parse for Definition {
             let item: syn::ItemStruct = input.parse()?;
             attrs.extend(item.attrs);
 
-            let mut attrs = parse_attr_list(&attrs);
-            let trait_props = TraitProps::pick_from(&mut attrs);
+            let attrs = parse_attr_list(&attrs);
             if !attrs.is_empty() {
                 for (_, span) in attrs {
                     emit_error!(span, "unexpected container attribute");
@@ -673,13 +634,12 @@ impl Parse for Definition {
 
             match item.fields {
                 syn::Fields::Named(n) => {
-                    Struct::new(item.ident, trait_props, item.generics, n.named.into_iter())
+                    Struct::new(item.ident, item.generics, n.named.into_iter())
                         .map(Definition::Struct)
                 }
                 syn::Fields::Unnamed(u) => {
                     let tup = Struct::new(
                         item.ident.clone(),
-                        trait_props.clone(),
                         item.generics.clone(),
                         u.unnamed.into_iter(),
                     )?;
@@ -692,13 +652,8 @@ impl Parse for Definition {
                         Ok(Definition::TupleStruct(tup))
                     }
                 }
-                syn::Fields::Unit => Struct::new(
-                    item.ident,
-                    trait_props,
-                    item.generics,
-                    Vec::new().into_iter(),
-                )
-                .map(Definition::UnitStruct),
+                syn::Fields::Unit => Struct::new(item.ident, item.generics, Vec::new().into_iter())
+                    .map(Definition::UnitStruct),
             }
         } else if lookahead.peek(syn::Token![enum]) {
             let item: syn::ItemEnum = input.parse()?;
@@ -914,11 +869,6 @@ impl Attr {
         } else if lookahead.peek(kw::type_name) {
             let _kw: kw::type_name = input.parse()?;
             Ok(Attr::FieldMode(FieldMode::TypeName))
-        } else if lookahead.peek(kw::span_type) {
-            let _kw: kw::span_type = input.parse()?;
-            let _eq: syn::Token![=] = input.parse()?;
-            let ty: syn::Type = input.parse()?;
-            Ok(Attr::SpanType(ty))
         } else {
             Err(lookahead.error())
         }

@@ -1,14 +1,12 @@
-use knus::span::Span;
 use knus::traits::Decode;
 
 #[derive(knus_derive::Decode, Debug)]
-#[knus(span_type=knus::span::Span)]
 struct AstChildren {
     #[knus(children)]
-    children: Vec<knus::ast::SpannedNode<Span>>,
+    children: Vec<knus::ast::SpannedNode>,
 }
 
-fn parse<T: Decode<Span>>(text: &str) -> T {
+fn parse<T: Decode>(text: &str) -> T {
     let mut nodes: Vec<T> = knus::parse("<test>", text).unwrap();
     assert_eq!(nodes.len(), 1);
     nodes.remove(0)

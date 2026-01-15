@@ -8,7 +8,6 @@ use crate::definition::{Child, ChildMode, ExtraKind, Field, NewType};
 pub(crate) struct Common<'a> {
     pub object: &'a Struct,
     pub ctx: &'a syn::Ident,
-    pub span_type: &'a TokenStream,
 }
 
 fn child_can_partial(child: &Child) -> bool {
@@ -25,28 +24,15 @@ pub fn emit_struct(s: &Struct, named: bool) -> syn::Result<TokenStream> {
 
     let (_, type_gen, _) = s.generics.split_for_impl();
     let mut common_generics = s.generics.clone();
-    let span_ty;
-    if let Some(ty) = s.trait_props.span_type.as_ref() {
-        span_ty = quote!(#ty);
-    } else {
-        if common_generics.params.is_empty() {
-            common_generics.lt_token = Some(Default::default());
-            common_generics.gt_token = Some(Default::default());
-        }
-        common_generics.params.push(syn::parse2(quote!(S)).unwrap());
-        span_ty = quote!(S);
-        common_generics
-            .make_where_clause()
-            .predicates
-            .push(syn::parse2(quote!(S: ::knus::traits::ErrorSpan)).unwrap());
-    };
-    let trait_gen = quote!(<#span_ty>);
+    if common_generics.params.is_empty() {
+        common_generics.lt_token = Some(Default::default());
+        common_generics.gt_token = Some(Default::default());
+    }
     let (impl_gen, _, bounds) = common_generics.split_for_impl();
 
     let common = Common {
         object: s,
         ctx: &ctx,
-        span_type: &span_ty,
     };
 
     let decode_specials = decode_specials(&common, &node)?;
@@ -87,22 +73,22 @@ pub fn emit_struct(s: &Struct, named: bool) -> syn::Result<TokenStream> {
         let insert_child = insert_child(&common, &node)?;
         let insert_property = insert_property(&common, &name, &value)?;
         extra_traits.push(quote! {
-            impl #impl_gen ::knus::traits::DecodePartial #trait_gen
+            impl #impl_gen ::knus::traits::DecodePartial
                 for #s_name #type_gen
                 #bounds
             {
                 fn insert_child(&mut self,
-                    #node: &::knus::ast::SpannedNode<#span_ty>,
-                    #ctx: &mut ::knus::decode::Context<#span_ty>)
-                    -> ::std::result::Result<bool, ::knus::errors::DecodeError<#span_ty>>
+                    #node: &::knus::ast::SpannedNode,
+                    #ctx: &mut ::knus::decode::Context)
+                    -> ::std::result::Result<bool, ::knus::errors::DecodeError>
                 {
                     #insert_child
                 }
                 fn insert_property(&mut self,
-                    #name: &::knus::span::Spanned<Box<str>, #span_ty>,
-                    #value: &::knus::ast::Value<#span_ty>,
-                    #ctx: &mut ::knus::decode::Context<#span_ty>)
-                    -> ::std::result::Result<bool, ::knus::errors::DecodeError<#span_ty>>
+                    #name: &::knus::span::Spanned<Box<str>>,
+                    #value: &::knus::ast::Value,
+                    #ctx: &mut ::knus::decode::Context)
+                    -> ::std::result::Result<bool, ::knus::errors::DecodeError>
                 {
                     #insert_property
                 }
@@ -117,14 +103,14 @@ pub fn emit_struct(s: &Struct, named: bool) -> syn::Result<TokenStream> {
     {
         let decode_children = decode_children(&common, &children, None)?;
         extra_traits.push(quote! {
-            impl #impl_gen ::knus::traits::DecodeChildren #trait_gen
+            impl #impl_gen ::knus::traits::DecodeChildren
                 for #s_name #type_gen
                 #bounds
             {
                 fn decode_children(
-                    #children: &[::knus::ast::SpannedNode<#span_ty>],
-                    #ctx: &mut ::knus::decode::Context<#span_ty>)
-                    -> ::std::result::Result<Self, ::knus::errors::DecodeError<#span_ty>>
+                    #children: &[::knus::ast::SpannedNode],
+                    #ctx: &mut ::knus::decode::Context)
+                    -> ::std::result::Result<Self, ::knus::errors::DecodeError>
                 {
                     #decode_children
                     #assign_extra
@@ -135,12 +121,12 @@ pub fn emit_struct(s: &Struct, named: bool) -> syn::Result<TokenStream> {
     }
     Ok(quote! {
         #(#extra_traits)*
-        impl #impl_gen ::knus::Decode #trait_gen for #s_name #type_gen
+        impl #impl_gen ::knus::Decode for #s_name #type_gen
             #bounds
         {
-            fn decode_node(#node: &::knus::ast::SpannedNode<#span_ty>,
-                           #ctx: &mut ::knus::decode::Context<#span_ty>)
-                -> ::std::result::Result<Self, ::knus::errors::DecodeError<#span_ty>>
+            fn decode_node(#node: &::knus::ast::SpannedNode,
+                           #ctx: &mut ::knus::decode::Context)
+                -> ::std::result::Result<Self, ::knus::errors::DecodeError>
             {
                 #decode_specials
                 #decode_args
@@ -159,12 +145,11 @@ pub fn emit_new_type(s: &NewType) -> syn::Result<TokenStream> {
     let node = syn::Ident::new("node", Span::mixed_site());
     let ctx = syn::Ident::new("ctx", Span::mixed_site());
     Ok(quote! {
-        impl<S: ::knus::traits::ErrorSpan>
-            ::knus::Decode<S> for #s_name
+        impl ::knus::Decode for #s_name
         {
-            fn decode_node(#node: &::knus::ast::SpannedNode<S>,
-                           #ctx: &mut ::knus::decode::Context<S>)
-                -> ::std::result::Result<Self, ::knus::errors::DecodeError<S>>
+            fn decode_node(#node: &::knus::ast::SpannedNode,
+                           #ctx: &mut ::knus::decode::Context)
+                -> ::std::result::Result<Self, ::knus::errors::DecodeError>
             {
                 if #node.arguments.len() > 0 ||
                     #node.properties.len() > 0 ||
@@ -567,10 +552,8 @@ fn unwrap_fn(
     attrs: &FieldAttrs,
 ) -> syn::Result<TokenStream> {
     let ctx = parent.ctx;
-    let span_ty = parent.span_type;
     let mut bld = StructBuilder::new(
         format_ident!("Wrap_{}", name, span = Span::mixed_site()),
-        parent.object.trait_props.clone(),
         parent.object.generics.clone(),
     );
     bld.add_field(Field::new_named(name), false, false, attrs)?;
@@ -578,7 +561,6 @@ fn unwrap_fn(
     let common = Common {
         object: &object,
         ctx: parent.ctx,
-        span_type: parent.span_type,
     };
 
     let node = syn::Ident::new("node", Span::mixed_site());
@@ -587,8 +569,8 @@ fn unwrap_fn(
     let decode_props = decode_props(&common, &node)?;
     let decode_children = decode_children(&common, &children, Some(quote!(#node.span())))?;
     Ok(quote! {
-        let mut #func = |#node: &::knus::ast::SpannedNode<#span_ty>,
-                         #ctx: &mut ::knus::decode::Context<#span_ty>|
+        let mut #func = |#node: &::knus::ast::SpannedNode,
+                         #ctx: &mut ::knus::decode::Context|
         {
             #decode_args
             #decode_props
@@ -925,7 +907,7 @@ fn decode_children(
                 match &**#child.node_name {
                     #(#match_branches)*
                 }
-            }).collect::<::std::result::Result<_, ::knus::errors::DecodeError<_>>>()?;
+            }).collect::<::std::result::Result<_, ::knus::errors::DecodeError>>()?;
             #(#postprocess)*
         })
     } else {
@@ -945,7 +927,7 @@ fn decode_children(
                 match &**#child.node_name {
                     #(#match_branches)*
                 }
-            }).collect::<::std::result::Result<(), ::knus::errors::DecodeError<_>>>()?;
+            }).collect::<::std::result::Result<(), ::knus::errors::DecodeError>>()?;
             #(#postprocess)*
         })
     }
