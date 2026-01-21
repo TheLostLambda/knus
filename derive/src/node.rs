@@ -664,6 +664,26 @@ fn insert_child(s: &Common, node: &syn::Ident) -> syn::Result<TokenStream> {
                     Ok(true)
                 }
             });
+        } else if matches!(child_def.mode, ChildMode::Enum) {
+            let dup_err = "duplicate node, single child expected";
+            let value = syn::Ident::new("value", Span::mixed_site());
+            match_branches.push(quote! {
+                _ => {
+                    match ::knus::Decode::decode_node(#node, #ctx) {
+                        Ok(#value) => {
+                            if #dest.is_some() {
+                                #ctx.emit_error(
+                                    ::knus::errors::DecodeError::unexpected(
+                                        &#node.node_name, "node", #dup_err));
+                            } else {
+                                #dest = Some(#value);
+                            }
+                            Ok(true)
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+            });
         } else {
             let dup_err = format!(
                 "duplicate node `{}`, single node expected",
@@ -878,6 +898,62 @@ fn decode_children(
                         None
                     }
                 });
+            }
+            ChildMode::Enum => {
+                // For enum children, we use a wildcard match and let the enum's
+                // decode_node implementation handle the node name matching.
+                declare_empty.push(quote! {
+                    let mut #fld = None;
+                });
+                let dup_err = "duplicate node, single child expected";
+                let value = syn::Ident::new("value", Span::mixed_site());
+                match_branches.push(quote! {
+                    _ => {
+                        match ::knus::Decode::decode_node(#child, #ctx) {
+                            Ok(#value) => {
+                                if #fld.is_some() {
+                                    Some(Err(
+                                        ::knus::errors::DecodeError::unexpected(
+                                            &#child.node_name, "node", #dup_err)))
+                                } else {
+                                    #fld = Some(#value);
+                                    None
+                                }
+                            }
+                            Err(e) => Some(Err(e)),
+                        }
+                    }
+                });
+                let req_msg = "single child node is required";
+                if let Some(default_value) = &child_def.default {
+                    let default = if let Some(expr) = default_value {
+                        quote!(#expr)
+                    } else {
+                        quote!(::std::default::Default::default())
+                    };
+                    postprocess.push(quote! {
+                        let #fld = #fld.unwrap_or_else(|| #default);
+                    });
+                } else if !child_def.option {
+                    if let Some(span) = &err_span {
+                        postprocess.push(quote! {
+                            let #fld = #fld.ok_or_else(|| {
+                                ::knus::errors::DecodeError::Missing {
+                                    span: #span.clone(),
+                                    message: #req_msg.into(),
+                                }
+                            })?;
+                        });
+                    } else {
+                        postprocess.push(quote! {
+                            let #fld = #fld.ok_or_else(|| {
+                                ::knus::errors::DecodeError::MissingNode {
+                                    message: #req_msg.into(),
+                                }
+                            })?;
+                        });
+                    }
+                }
             }
         }
     }

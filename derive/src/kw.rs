@@ -3,6 +3,7 @@ syn::custom_keyword!(arguments);
 syn::custom_keyword!(bytes);
 syn::custom_keyword!(child);
 syn::custom_keyword!(children);
+syn::custom_keyword!(from_enum);
 syn::custom_keyword!(default);
 syn::custom_keyword!(flatten);
 syn::custom_keyword!(name);
