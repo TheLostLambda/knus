@@ -36,7 +36,7 @@ pub enum FieldMode {
     Arguments,
     Properties,
     Children { name: Option<String> },
-    Child,
+    Child { from_enum: bool },
     Flatten(Flatten),
     Span,
     NodeName,
@@ -155,6 +155,7 @@ pub struct Child {
 pub struct VarChildren {
     pub field: Field,
     pub unwrap: Option<Box<FieldAttrs>>,
+    pub exactly_one: bool,
 }
 
 pub enum ExtraKind {
@@ -440,7 +441,7 @@ impl StructBuilder {
                         .unwrap_or(DecodeMode::Normal),
                 });
             }
-            Some(FieldMode::Child) => {
+            Some(FieldMode::Child { from_enum }) => {
                 attrs.no_decode("children");
                 if let Some(prev) = &self.var_children {
                     return Err(err_pair(
@@ -450,29 +451,37 @@ impl StructBuilder {
                         "capture all `children` is defined here",
                     ));
                 }
-                let name = match &field.attr {
-                    AttrAccess::Named(n) => {
-                        heck::ToKebabCase::to_kebab_case(&n.unraw().to_string()[..])
-                    }
-                    AttrAccess::Indexed(_) => {
-                        return Err(syn::Error::new(
-                            field.span,
-                            "`child` is not allowed for tuple structs",
-                        ));
-                    }
-                };
-                self.children.push(Child {
-                    name,
-                    field,
-                    option: is_option,
-                    mode: if attrs.unwrap.is_none() && is_bool {
-                        ChildMode::Bool
-                    } else {
-                        ChildMode::Normal
-                    },
-                    unwrap: attrs.unwrap.clone(),
-                    default: attrs.default.clone(),
-                });
+                if *from_enum {
+                    self.var_children = Some(VarChildren {
+                        field,
+                        unwrap: attrs.unwrap.clone(),
+                        exactly_one: true,
+                    });
+                } else {
+                    let name = match &field.attr {
+                        AttrAccess::Named(n) => {
+                            heck::ToKebabCase::to_kebab_case(&n.unraw().to_string()[..])
+                        }
+                        AttrAccess::Indexed(_) => {
+                            return Err(syn::Error::new(
+                                field.span,
+                                "`child` is not allowed for tuple structs",
+                            ));
+                        }
+                    };
+                    self.children.push(Child {
+                        name,
+                        field,
+                        option: is_option,
+                        mode: if attrs.unwrap.is_none() && is_bool {
+                            ChildMode::Bool
+                        } else {
+                            ChildMode::Normal
+                        },
+                        unwrap: attrs.unwrap.clone(),
+                        default: attrs.default.clone(),
+                    });
+                }
             }
             Some(FieldMode::Children { name: Some(name) }) => {
                 attrs.no_decode("children");
@@ -506,6 +515,7 @@ impl StructBuilder {
                 self.var_children = Some(VarChildren {
                     field,
                     unwrap: attrs.unwrap.clone(),
+                    exactly_one: false,
                 });
             }
             Some(FieldMode::Flatten(flatten)) => {
@@ -817,7 +827,19 @@ impl Attr {
             Ok(Attr::FieldMode(FieldMode::Children { name }))
         } else if lookahead.peek(kw::child) {
             let _kw: kw::child = input.parse()?;
-            Ok(Attr::FieldMode(FieldMode::Child))
+            let mut from_enum = false;
+            if !input.is_empty() && !input.lookahead1().peek(syn::Token![,]) {
+                let parens;
+                syn::parenthesized!(parens in input);
+                let lookahead = parens.lookahead1();
+                if lookahead.peek(kw::from_enum) {
+                    let _kw: kw::from_enum = parens.parse()?;
+                    from_enum = true;
+                } else {
+                    return Err(lookahead.error());
+                }
+            }
+            Ok(Attr::FieldMode(FieldMode::Child { from_enum }))
         } else if lookahead.peek(kw::unwrap) {
             let _kw: kw::unwrap = input.parse()?;
             let parens;

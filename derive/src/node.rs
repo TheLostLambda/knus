@@ -883,6 +883,7 @@ fn decode_children(
     }
     if let Some(var_children) = &s.object.var_children {
         let fld = &var_children.field.tmp_name;
+        let exactly_one: bool = var_children.exactly_one;
 
         let (init, func) = if let Some(unwrap) = &var_children.unwrap {
             let func = format_ident!("unwrap_{}", fld, span = Span::mixed_site());
@@ -890,6 +891,44 @@ fn decode_children(
             (unwrap_fn, quote!(#func))
         } else {
             (quote!(), quote!(::knus::Decode::decode_node))
+        };
+
+        // Code to unwrap the vector if exactly_one is set
+        let move_out_of_vec = if exactly_one {
+            let missing_err = if let Some(span) = &err_span {
+                quote! {
+                    return Err(::knus::errors::DecodeError::Missing {
+                        span: *#span,
+                        message: "exactly one child node is required".to_string(),
+                    });
+                }
+            } else {
+                quote! {
+                    return Err(::knus::errors::DecodeError::MissingNode {
+                        message: "exactly one child node is required".to_string(),
+                    });
+                }
+            };
+            quote! {
+                let #fld = match <[_; 1]>::try_from(child_vec) {
+                    Ok([child]) => child,
+                    Err(child_vec) => {
+                        if child_vec.len() == 0 {
+                            #missing_err
+                        } else {
+                            return Err(::knus::errors::DecodeError::Unexpected {
+                                span: *#children.last().unwrap().span(),
+                                kind: "child node",
+                                message: "unexpected node; single child expected".to_string(),
+                            });
+                        }
+                    }
+                };
+            }
+        } else {
+            quote! {
+                let #fld = child_vec;
+            }
         };
 
         match_branches.push(quote! {
@@ -903,11 +942,12 @@ fn decode_children(
         });
         Ok(quote! {
             #(#declare_empty)*
-            let #fld = #children.iter().flat_map(|#child| {
+            let child_vec: Vec<_> = #children.iter().flat_map(|#child| {
                 match &**#child.node_name {
                     #(#match_branches)*
                 }
             }).collect::<::std::result::Result<_, ::knus::errors::DecodeError>>()?;
+            #move_out_of_vec
             #(#postprocess)*
         })
     } else {

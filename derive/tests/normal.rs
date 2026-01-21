@@ -850,3 +850,113 @@ fn parse_extra() {
     assert_eq!(parse::<Extra>(r#"data"#), Extra { field: "".into() });
     assert_eq!(parse_err::<Extra>(r#"data x=1"#), "unexpected property `x`");
 }
+
+// Tests for child_enum attribute
+
+#[derive(knus_derive::Decode, Debug, PartialEq)]
+enum RecordType {
+    A(#[knus(argument)] String),
+    Aaaa(#[knus(argument)] String),
+}
+
+#[derive(knus_derive::Decode, Debug, PartialEq)]
+struct ResourceRecord {
+    #[knus(argument)]
+    name: String,
+    #[knus(child(from_enum))]
+    r#type: RecordType,
+}
+
+#[derive(knus_derive::Decode, Debug, PartialEq)]
+struct ResourceRecordOnlyType {
+    #[knus(child(from_enum))]
+    r#type: RecordType,
+}
+
+#[derive(knus_derive::Decode, Debug, PartialEq)]
+struct DnsConfig {
+    #[knus(children(name = "rr"))]
+    resource_records: Vec<ResourceRecord>,
+}
+
+#[test]
+fn parse_child_enum() {
+    // Basic case: enum child with A record
+    assert_eq!(
+        parse::<ResourceRecord>(r#"rr "example.com" { a "192.0.2.1"; }"#),
+        ResourceRecord {
+            name: "example.com".into(),
+            r#type: RecordType::A("192.0.2.1".into()),
+        }
+    );
+
+    // Basic case: enum child with AAAA record
+    assert_eq!(
+        parse::<ResourceRecord>(r#"rr "example.com" { aaaa "2001:db8::1"; }"#),
+        ResourceRecord {
+            name: "example.com".into(),
+            r#type: RecordType::Aaaa("2001:db8::1".into()),
+        }
+    );
+
+    // Error: missing child
+    assert_eq!(
+        parse_err::<ResourceRecord>(r#"rr "example.com""#),
+        "exactly one child node is required"
+    );
+
+    // Error: unknown child node name
+    assert!(
+        parse_err::<ResourceRecord>(r#"rr "example.com" { cname "other.com"; }"#)
+            .contains("expected one of")
+    );
+
+    // Error: duplicate child
+    assert_eq!(
+        parse_err::<ResourceRecord>(r#"rr "example.com" { a "192.0.2.1"; aaaa "2001:db8::1"; }"#),
+        "unexpected node; single child expected"
+    );
+}
+
+#[test]
+fn parse_child_enum_no_args() {
+    assert_eq!(
+        parse_doc::<ResourceRecordOnlyType>(r#"a "192.0.2.1""#),
+        ResourceRecordOnlyType {
+            r#type: RecordType::A("192.0.2.1".into()),
+        }
+    );
+    assert_eq!(
+        parse_doc_err::<ResourceRecordOnlyType>("a \"192.0.2.1\"\na \"192.0.2.1\""),
+        "unexpected node; single child expected"
+    );
+}
+
+#[test]
+fn parse_dns_config() {
+    // Full config with multiple resource records
+    assert_eq!(
+        parse_doc::<DnsConfig>(
+            r#"
+            rr "example.com" {
+                a "192.0.2.1"
+            }
+            rr "ipv6.example.com" {
+                aaaa "2001:db8::1"
+            }
+            "#
+        ),
+        DnsConfig {
+            resource_records: vec![
+                ResourceRecord {
+                    name: "example.com".into(),
+                    r#type: RecordType::A("192.0.2.1".into()),
+                },
+                ResourceRecord {
+                    name: "ipv6.example.com".into(),
+                    r#type: RecordType::Aaaa("2001:db8::1".into()),
+                },
+            ],
+        }
+    );
+}
