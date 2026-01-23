@@ -320,7 +320,7 @@ fn parse_arg_def_value() {
         }
     );
     assert_eq!(
-        parse::<ArgDefOptValue>(r#"node null"#),
+        parse::<ArgDefOptValue>(r#"node #null"#),
         ArgDefOptValue { name: None }
     );
 }
@@ -334,7 +334,7 @@ fn parse_opt_arg() {
         }
     );
     assert_eq!(parse::<OptArg>(r#"node"#), OptArg { name: None });
-    assert_eq!(parse::<OptArg>(r#"node null"#), OptArg { name: None });
+    assert_eq!(parse::<OptArg>(r#"node #null"#), OptArg { name: None });
 }
 
 #[test]
@@ -412,7 +412,7 @@ fn parse_prop_def_value() {
         }
     );
     assert_eq!(
-        parse::<PropDefOptValue>(r#"node label=null"#),
+        parse::<PropDefOptValue>(r#"node label=#null"#),
         PropDefOptValue { label: None }
     );
 }
@@ -519,7 +519,7 @@ fn parse_opt_prop() {
     );
     assert_eq!(parse::<OptProp>(r#"node"#), OptProp { label: None });
     assert_eq!(
-        parse::<OptProp>(r#"node label=null"#),
+        parse::<OptProp>(r#"node label=#null"#),
         OptProp { label: None }
     );
 }
@@ -803,7 +803,7 @@ fn parse_str() {
     );
     assert!(parse_err::<ParseOpt>(r#"server listen="2/3""#).contains("invalid"));
     assert_eq!(
-        parse::<ParseOpt>(r#"server listen=null"#),
+        parse::<ParseOpt>(r#"server listen=#null"#),
         ParseOpt { listen: None }
     );
 }
@@ -840,7 +840,7 @@ fn parse_bytes() {
         }
     );
     assert_eq!(
-        parse::<OptBytes>(r#"node data=null"#),
+        parse::<OptBytes>(r#"node data=#null"#),
         OptBytes { data: None }
     );
 }
