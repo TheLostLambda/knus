@@ -30,7 +30,7 @@ fn parse_enum() {
             u64 1234
             f64 16.125e+1
             path "/hello/world"
-            boolean true
+            boolean #true
         "#
         ),
         Scalars {
