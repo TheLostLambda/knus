@@ -25,8 +25,8 @@ readme = "README.md"
 workspace = true
 
 [dependencies]
-chumsky = { version="0.9.3", default-features=false }
-knus-derive = { path="./derive", version= "3.3.1", optional=true }
+chumsky = { version="0.13", default-features=false }
+knus-derive = { path="./derive", version="3.3.1", optional=true }
 base64 = { version="0.22.1", optional=true }
 unicode-width = { version="0.2.0", optional=true }
 minicbor = { version="0.26.5", optional=true, features=["std", "derive"] }
