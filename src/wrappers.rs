@@ -5,13 +5,13 @@ use crate::ast::Document;
 use crate::decode::Context;
 use crate::errors::Error;
 use crate::grammar;
-use crate::span::Span;
 use crate::traits::DecodeChildren;
 
 /// Parse KDL text and return AST
 pub fn parse_ast(file_name: impl AsRef<str>, text: &str) -> Result<Document, Error> {
     grammar::document()
-        .parse(Span::stream(text))
+        .parse(text)
+        .into_result()
         .map_err(|errors| Error {
             source_code: NamedSource::new(file_name, text.to_string()),
             errors: errors.into_iter().map(Into::into).collect(),

@@ -7,6 +7,7 @@
 use crate::decode::Context;
 use crate::traits::DecodeSpan;
 
+use chumsky::span::SimpleSpan;
 /// Reexport of [miette::SourceSpan] trait that we use for parsing
 pub use miette::SourceSpan as ErrorSpan;
 
@@ -34,7 +35,7 @@ impl From<Span> for ErrorSpan {
     }
 }
 
-impl chumsky::Span for Span {
+impl chumsky::span::Span for Span {
     type Context = ();
     type Offset = usize;
     fn new(_context: (), range: std::ops::Range<usize>) -> Self {
@@ -46,6 +47,12 @@ impl chumsky::Span for Span {
     }
     fn end(&self) -> usize {
         self.1
+    }
+}
+
+impl From<SimpleSpan> for Span {
+    fn from(value: SimpleSpan) -> Self {
+        Span(value.start, value.end)
     }
 }
 
@@ -68,18 +75,6 @@ impl Span {
     /// Length of the span
     pub fn length(&self) -> usize {
         self.1.saturating_sub(self.0)
-    }
-
-    /// Creates a stream of characters with spans from the given text.
-    pub fn stream(text: &str) -> Stream<'_, Self>
-    where
-        Self: chumsky::Span,
-    {
-        let eoi = text.len();
-        chumsky::Stream::from_iter(
-            Span(eoi, eoi),
-            Map(text.chars(), OffsetTracker { offset: 0 }),
-        )
     }
 
     #[cfg(feature = "line-numbers")]
@@ -121,37 +116,6 @@ fn line_column_of_end(text: &str) -> (usize, usize) {
     }
     let column = unicode_width::UnicodeWidthStr::width(last_line);
     (line, column)
-}
-
-/// Helper struct for computing spans
-#[derive(Debug)]
-pub struct OffsetTracker {
-    offset: usize,
-}
-
-impl OffsetTracker {
-    fn next_span(&mut self, c: char) -> Span {
-        let offset = self.offset;
-        self.offset += c.len_utf8();
-        Span(offset, self.offset)
-    }
-}
-
-/// A wrapper around an iterator that produces characters with spans.
-#[allow(missing_debug_implementations)]
-pub struct Map<I: Iterator<Item = char>>(pub(crate) I, pub(crate) OffsetTracker);
-
-/// Short-hand for chumsky's `Stream` type with our spans and chars.
-pub type Stream<'a, S> = chumsky::Stream<'a, char, S, Map<std::str::Chars<'a>>>;
-
-impl<I> Iterator for Map<I>
-where
-    I: Iterator<Item = char>,
-{
-    type Item = (char, Span);
-    fn next(&mut self) -> Option<(char, Span)> {
-        self.0.next().map(|c| (c, self.1.next_span(c)))
-    }
 }
 
 impl DecodeSpan for Span {

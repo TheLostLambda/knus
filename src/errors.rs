@@ -6,6 +6,10 @@ use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::fmt::{self, Write};
 
+use chumsky::DefaultExpected;
+use chumsky::label::LabelError;
+use chumsky::span::SimpleSpan;
+use chumsky::util::Maybe;
 use miette::{Diagnostic, NamedSource};
 use thiserror::Error;
 
@@ -222,6 +226,17 @@ impl From<&'static str> for TokenFormat {
     }
 }
 
+impl TryFrom<DefaultExpected<'_, char>> for TokenFormat {
+    type Error = ();
+    fn try_from(e: DefaultExpected<'_, char>) -> Result<TokenFormat, ()> {
+        match e {
+            DefaultExpected::Token(c) => Ok(TokenFormat::Char(*c)),
+            DefaultExpected::EndOfInput => Ok(TokenFormat::Eoi),
+            _ => Err(()),
+        }
+    }
+}
+
 impl fmt::Display for TokenFormat {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use TokenFormat::*;
@@ -350,30 +365,63 @@ impl ParseError {
     }
 }
 
-impl chumsky::Error<char> for ParseError {
-    type Span = Span;
-    type Label = &'static str;
-    fn expected_input_found<Iter>(span: Self::Span, expected: Iter, found: Option<char>) -> Self
-    where
-        Iter: IntoIterator<Item = Option<char>>,
-    {
+impl<'src> LabelError<'src, &'src str, DefaultExpected<'src, char>> for ParseError {
+    fn expected_found<E: IntoIterator<Item = DefaultExpected<'src, char>>>(
+        expected: E,
+        found: Option<Maybe<char, &'src char>>,
+        span: SimpleSpan,
+    ) -> Self {
         ParseError::Unexpected {
             label: None,
-            span,
-            found: found.into(),
-            expected: expected.into_iter().map(Into::into).collect(),
+            span: span.into(),
+            found: found.map(|c| *c).into(),
+            expected: expected
+                .into_iter()
+                .filter_map(|e| e.try_into().ok())
+                .collect(),
         }
     }
-    fn with_label(mut self, new_label: Self::Label) -> Self {
+    fn label_with(&mut self, new_label: DefaultExpected<'src, char>) {
         use ParseError::*;
+        let new_label = match new_label {
+            DefaultExpected::EndOfInput => "end of input",
+            DefaultExpected::Token(_) => "token",
+            DefaultExpected::Any => "any",
+            DefaultExpected::SomethingElse => "something else",
+            _ => "other",
+        };
         match self {
-            Unexpected { ref mut label, .. } => *label = Some(new_label),
-            Unclosed { ref mut label, .. } => *label = new_label,
-            Message { ref mut label, .. } => *label = Some(new_label),
-            MessageWithHelp { ref mut label, .. } => *label = Some(new_label),
+            Unexpected { label, .. } => *label = Some(new_label),
+            Unclosed { label, .. } => *label = new_label,
+            Message { label, .. } => *label = Some(new_label),
+            MessageWithHelp { label, .. } => *label = Some(new_label),
         }
-        self
     }
+    // fn merge_expected_found<E: IntoIterator<Item = L>>(
+    //     self,
+    //     expected: E,
+    //     found: Option<MaybeRef<'src, I::Token>>,
+    //     span: I::Span,
+    // ) -> Self
+    // where
+    //     Self: Error<'src, I>,
+    // {
+    //     self.merge(LabelError::expected_found(expected, found, span))
+    // }
+
+    // /// Fast path for `a = LabelError::expected_found(...)` that may incur less overhead by, for example, reusing allocations.
+    // #[inline(always)]
+    // fn replace_expected_found<E: IntoIterator<Item = L>>(
+    //     self,
+    //     expected: E,
+    //     found: Option<MaybeRef<'src, I::Token>>,
+    //     span: I::Span,
+    // ) -> Self {
+    //     LabelError::expected_found(expected, found, span)
+    // }
+}
+
+impl<'src> chumsky::error::Error<'src, &'src str> for ParseError {
     fn merge(mut self, other: Self) -> Self {
         use ParseError::*;
         match (&mut self, other) {
@@ -383,25 +431,10 @@ impl chumsky::Error<char> for ParseError {
                 dest.extend(expected);
                 self
             }
+            (MessageWithHelp { .. }, _) => self,
+            (_, other @ MessageWithHelp { .. }) => other,
             (Message { .. }, _) => self,
             (_, other @ Message { .. }) => other,
-            (_, other) => todo!("{} -> {}", self, other),
-        }
-    }
-    fn unclosed_delimiter(
-        unclosed_span: Self::Span,
-        unclosed: char,
-        span: Self::Span,
-        expected: char,
-        found: Option<char>,
-    ) -> Self {
-        ParseError::Unclosed {
-            label: "delimited",
-            opened_at: unclosed_span,
-            opened: unclosed.into(),
-            expected_at: span,
-            expected: expected.into(),
-            found: found.into(),
         }
     }
 }
