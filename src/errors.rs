@@ -157,6 +157,14 @@ pub(crate) enum TokenFormat {
     Kind(&'static str),
     OpenRaw(usize),
     CloseRaw(usize),
+    /// Opening delimiter for multi-line quoted string: """
+    OpenMultiline,
+    /// Closing delimiter for multi-line quoted string: """
+    CloseMultiline,
+    /// Opening delimiter for multi-line raw string: #""" (with n hashes)
+    OpenMultilineRaw(usize),
+    /// Closing delimiter for multi-line raw string: """# (with n hashes)
+    CloseMultilineRaw(usize),
     Eoi,
 }
 
@@ -262,6 +270,22 @@ impl fmt::Display for TokenFormat {
             CloseRaw(0) => f.write_str("`\"`"),
             CloseRaw(n) => {
                 f.write_str("`\"")?;
+                for _ in 0..*n {
+                    f.write_char('#')?;
+                }
+                f.write_char('`')
+            }
+            OpenMultiline => f.write_str("`\"\"\"`"),
+            CloseMultiline => f.write_str("`\"\"\"`"),
+            OpenMultilineRaw(n) => {
+                f.write_str("`")?;
+                for _ in 0..*n {
+                    f.write_char('#')?;
+                }
+                f.write_str("\"\"\"`")
+            }
+            CloseMultilineRaw(n) => {
+                f.write_str("`\"\"\"")?;
                 for _ in 0..*n {
                     f.write_char('#')?;
                 }

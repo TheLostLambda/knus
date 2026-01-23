@@ -178,7 +178,8 @@ fn raw_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone
         .repeated()
         .at_least(1)
         .count()
-        .then_ignore(just('"'))
+        // Single quote only - reject """ which is multi-line syntax
+        .then_ignore(just('"').then_ignore(just("\"\"").not().rewind()))
         .ignore_with_ctx(
             any()
                 .and_is(just('"').then(matching_hashes).not())
@@ -211,11 +212,440 @@ fn raw_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone
 }
 
 fn string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
-    choice((raw_string(), escaped_string()))
+    // Beware the order: multi-line variants must be tried before single-line variants
+    // to ensure #""" is parsed as multi-line raw string, not single-line with content "".
+    choice((
+        multiline_raw_string(),
+        raw_string(),
+        multiline_escaped_string(),
+        escaped_string(),
+    ))
 }
 
 fn expected_kind(s: &'static str) -> BTreeSet<TokenFormat> {
     [TokenFormat::Kind(s)].into_iter().collect()
+}
+
+/// Normalize newlines: convert all newline variants to LF
+fn normalize_newlines(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\r' => {
+                // CRLF or CR -> LF
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                result.push('\n');
+            }
+            '\x0C' | '\x0B' | '\u{0085}' | '\u{2028}' | '\u{2029}' => {
+                // Form feed, vertical tab, next line, line/paragraph separator -> LF
+                result.push('\n');
+            }
+            _ => result.push(c),
+        }
+    }
+    result
+}
+
+/// Check if a character is a KDL whitespace character
+fn is_kdl_ws(c: char) -> bool {
+    matches!(
+        c,
+        '\t' | ' ' | '\u{00a0}' | '\u{1680}' | '\u{2000}'
+            ..='\u{200A}' | '\u{202F}' | '\u{205F}' | '\u{3000}'
+    )
+}
+
+/// Error type for multi-line string dedentation with location information
+enum MultilineStringError {
+    /// Opening delimiter not followed by newline
+    NoOpeningNewline,
+    /// Closing delimiter has non-whitespace before it on same line
+    ClosingNotOnOwnLine,
+    /// A line doesn't start with required indent (offset within content, length of line)
+    InsufficientIndent { offset: usize, length: usize },
+}
+
+/// Dedent a multi-line string based on the closing line's whitespace prefix.
+/// Also strips the first and last newlines.
+/// Returns (dedented_string, indent_byte_len) where indent_byte_len is the byte length
+/// of the indentation that was stripped from each line.
+fn dedent_multiline_string(s: &str) -> Result<(String, usize), MultilineStringError> {
+    // Normalize newlines first
+    let normalized = normalize_newlines(s);
+
+    // The structure should be: <newline><content-lines><newline><indent>
+    // Where the opening newline is required, and the closing newline + indent forms the final line
+
+    // Find the last newline - this separates the content from the closing indent
+    let last_newline_pos = match normalized.rfind('\n') {
+        Some(pos) => pos,
+        None => {
+            // No newline at all - invalid
+            return Err(MultilineStringError::NoOpeningNewline);
+        }
+    };
+
+    // The indent is everything after the last newline
+    let indent = &normalized[last_newline_pos + 1..];
+    let indent_len = indent.len();
+
+    // Validate that indent is all whitespace
+    if !indent.chars().all(is_kdl_ws) {
+        return Err(MultilineStringError::ClosingNotOnOwnLine);
+    }
+
+    // Content before the last newline
+    let before_last_newline = &normalized[..last_newline_pos];
+
+    // Special case: empty multi-line string (just one newline)
+    // Structure: """<newline>"""  -> content between delimiters is just "\n"
+    if before_last_newline.is_empty() {
+        // The entire content was just a newline, representing an empty string
+        return Ok((String::new(), indent_len));
+    }
+
+    // The content must start with a newline (the one after opening delimiter)
+    if !before_last_newline.starts_with('\n') {
+        return Err(MultilineStringError::NoOpeningNewline);
+    }
+
+    // Strip the first newline to get the actual content lines
+    let content = &before_last_newline[1..];
+
+    // Dedent each line, tracking offset for error reporting
+    let mut result = String::with_capacity(content.len());
+    let mut offset_in_content = 0usize;
+    let mut first = true;
+    for line in content.split('\n') {
+        if !first {
+            result.push('\n');
+        }
+        first = false;
+
+        // Whitespace-only lines are kept as empty (don't need to match indent)
+        if line.chars().all(is_kdl_ws) {
+            offset_in_content += line.len() + 1; // +1 for the newline
+            continue;
+        }
+
+        // Non-whitespace lines must start with the indent
+        if !line.starts_with(indent) {
+            // Offset in original content: 1 (for first newline) + offset_in_content
+            // Length is just the whitespace prefix (in bytes), not the whole line
+            let ws_prefix_byte_len: usize = line
+                .chars()
+                .take_while(|c| is_kdl_ws(*c))
+                .map(|c| c.len_utf8())
+                .sum();
+            return Err(MultilineStringError::InsufficientIndent {
+                offset: 1 + offset_in_content,
+                length: ws_prefix_byte_len,
+            });
+        }
+        result.push_str(&line[indent.len()..]);
+        offset_in_content += line.len() + 1; // +1 for the newline
+    }
+
+    Ok((result, indent_len))
+}
+
+/// Process escape sequences in a string
+/// Error from process_escapes: (start_offset, end_offset, message)
+/// Offsets are byte positions relative to the input string.
+fn process_escapes(s: &str) -> Result<String, (usize, usize, String)> {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.char_indices().peekable();
+
+    while let Some((i, c)) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some((_, '"')) => result.push('"'),
+                Some((_, '\\')) => result.push('\\'),
+                Some((_, 'b')) => result.push('\u{0008}'),
+                Some((_, 'f')) => result.push('\u{000C}'),
+                Some((_, 'n')) => result.push('\n'),
+                Some((_, 'r')) => result.push('\r'),
+                Some((_, 't')) => result.push('\t'),
+                Some((_, 's')) => result.push(' '),
+                Some((_, 'u')) => {
+                    // Parse unicode escape \u{XXXX}
+                    'check_brace: {
+                        let char_len = match chars.next() {
+                            Some((_, '{')) => {
+                                break 'check_brace;
+                            }
+                            Some((_, c)) => c.len_utf8(),
+                            None => {
+                                // String ended after \u
+                                0
+                            }
+                        };
+                        // Point to \u and the wrong char
+                        return Err((i, i + 2 + char_len, "expected '{' after \\u".to_string()));
+                    }
+                    let mut hex = String::new();
+                    let close_pos = loop {
+                        match chars.next() {
+                            Some((j, '}')) => {
+                                break j + 1;
+                            }
+                            Some((j, c)) if c.is_ascii_hexdigit() => {
+                                if hex.len() >= 6 {
+                                    // Too many digits - span the whole escape up to and including the excess digit
+                                    return Err((
+                                        i,
+                                        j + c.len_utf8(),
+                                        "unicode escape too long".to_string(),
+                                    ));
+                                }
+                                hex.push(c);
+                            }
+                            Some((j, c)) => {
+                                // Invalid character - span the whole escape up to and including the invalid char
+                                return Err((
+                                    i,
+                                    j + c.len_utf8(),
+                                    format!("invalid character '{}' in unicode escape", c),
+                                ));
+                            }
+                            None => {
+                                // Unclosed - point from \ to end of string
+                                return Err((i, s.len(), "unclosed unicode escape".to_string()));
+                            }
+                        }
+                    };
+                    if hex.is_empty() {
+                        // Empty \u{} - point to the whole escape
+                        return Err((i, close_pos, "empty unicode escape".to_string()));
+                    }
+                    let code = u32::from_str_radix(&hex, 16).unwrap();
+                    match char::try_from(code) {
+                        Ok(c) => result.push(c),
+                        Err(_) => {
+                            // Invalid code point - point to the whole escape
+                            return Err((
+                                i,
+                                close_pos,
+                                format!("invalid unicode code point: {}", code),
+                            ));
+                        }
+                    }
+                }
+                Some((_, c)) if c == ' ' || c == '\t' || c == '\n' || is_kdl_ws(c) => {
+                    // Whitespace escape: consume whitespace and newlines, produce space
+                    while let Some(&(_, next)) = chars.peek() {
+                        if next == ' ' || next == '\t' || next == '\n' || is_kdl_ws(next) {
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    result.push(' ');
+                }
+                Some((j, c)) => {
+                    // Invalid escape char - span the backslash and the invalid character
+                    return Err((
+                        i,
+                        j + c.len_utf8(),
+                        format!("invalid escape character: '{}'", c),
+                    ));
+                }
+                None => {
+                    // Trailing backslash - point just to the backslash
+                    return Err((i, i + 1, "trailing backslash".to_string()));
+                }
+            }
+        } else {
+            result.push(c);
+        }
+    }
+
+    Ok(result)
+}
+
+/// Multi-line quoted string parser: """..."""
+/// The opening """ must be followed by a newline, and the closing """ must be on its own line.
+fn multiline_escaped_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
+    just("\"\"\"").ignore_then(
+        // Capture raw content - one or two quotes are allowed, but not three
+        choice((
+            // One double-quote that isn't followed by two more (not """)
+            just('"').then_ignore(just("\"\"").not().rewind()),
+            // Regular character (not quote)
+            none_of(['"']),
+        ))
+        .repeated()
+        .to_slice()
+        .then_ignore(just("\"\"\""))
+        .validate(|content: &str, extras, emit| {
+            let span = Span::from(extras.span());
+            // Note: span covers content + closing """, so span.end includes the closing delimiter
+            // Content is at span.start to span.end - 3
+            let content_len = content.len();
+
+            // Step 1: Dedent (which includes newline normalization)
+            let (dedented, indent_len) = match dedent_multiline_string(content) {
+                Ok(d) => d,
+                Err(e) => {
+                    let (label, error_span, message) = match e {
+                        MultilineStringError::NoOpeningNewline => (
+                            "must be followed by newline",
+                            span.before_start(3), // Point to opening """
+                            "opening delimiter must be immediately followed by a newline",
+                        ),
+                        MultilineStringError::ClosingNotOnOwnLine => (
+                            "must be on its own line",
+                            // Closing """ is at end of span (last 3 chars)
+                            Span(span.0 + content_len, span.1),
+                            "closing delimiter must be on its own line with only whitespace prefix",
+                        ),
+                        MultilineStringError::InsufficientIndent { offset, length } => (
+                            "insufficient indentation",
+                            // Offset is within content, which starts at span.0
+                            Span(span.0 + offset, span.0 + offset + length),
+                            "line must start with the same whitespace as the closing delimiter",
+                        ),
+                    };
+                    emit.emit(ParseError::Message {
+                        label: Some(label),
+                        span: error_span,
+                        message: message.to_string(),
+                    });
+                    return "".into();
+                }
+            };
+
+            // Step 2: Process escape sequences
+            match process_escapes(&dedented) {
+                Ok(processed) => processed.into(),
+                Err((start, end, msg)) => {
+                    // Map dedented offsets to content offsets:
+                    // The dedented string has indentation stripped from each line.
+                    // To map back to content positions, we need to account for:
+                    // - 1 byte for the leading newline
+                    // - indent_len bytes for the first line's indentation
+                    // - For each newline in the dedented string before the error,
+                    //   add indent_len bytes (the stripped indentation of that line)
+                    let newlines_before_start = dedented[..start].matches('\n').count();
+                    let newlines_before_end = dedented[..end].matches('\n').count();
+                    let content_start = 1 + indent_len + start + newlines_before_start * indent_len;
+                    let content_end = 1 + indent_len + end + newlines_before_end * indent_len;
+                    let error_span = Span(span.0 + content_start, span.0 + content_end);
+                    emit.emit(ParseError::Message {
+                        label: Some("invalid escape sequence"),
+                        span: error_span,
+                        message: msg,
+                    });
+                    "".into()
+                }
+            }
+        })
+        .map_err_with_state(|e: ParseError, span: SimpleSpan, _state| {
+            // Only produce Unclosed error after opening """ was successfully matched
+            let span: Span = span.into();
+            if matches!(
+                &e,
+                ParseError::Unexpected {
+                    found: TokenFormat::Eoi,
+                    ..
+                }
+            ) {
+                // Go back 3 chars for the """ that was already consumed
+                e.merge(ParseError::Unclosed {
+                    label: "multi-line string",
+                    opened_at: span.before_start(3),
+                    opened: TokenFormat::OpenMultiline,
+                    expected_at: span.at_end(),
+                    expected: TokenFormat::CloseMultiline,
+                    found: None.into(),
+                })
+            } else {
+                e
+            }
+        }),
+    )
+}
+
+/// Multi-line raw string parser: #"""..."""#, ##"""..."""##, etc.
+fn multiline_raw_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
+    let matching_hashes = just('#')
+        .repeated()
+        .configure(|cfg, hash_num| cfg.exactly(*hash_num));
+
+    just('#')
+        .repeated()
+        .at_least(1)
+        .count()
+        .then_ignore(just("\"\"\""))
+        .ignore_with_ctx(
+            any()
+                .and_is(just("\"\"\"").then(matching_hashes).not())
+                .repeated()
+                .to_slice()
+                .then(just("\"\"\"").ignore_then(matching_hashes.ignored()))
+                .map_err_with(move |e: ParseError, extras| {
+                    let hash_num = *extras.ctx();
+                    if matches!(
+                        &e,
+                        ParseError::Unexpected {
+                            found: TokenFormat::Eoi,
+                            ..
+                        }
+                    ) {
+                        e.merge(ParseError::Unclosed {
+                            label: "multi-line raw string",
+                            opened_at: Span::from(extras.span()).before_start(hash_num + 4),
+                            opened: TokenFormat::OpenMultilineRaw(hash_num),
+                            expected_at: Span::from(extras.span()).at_end(),
+                            expected: TokenFormat::CloseMultilineRaw(hash_num),
+                            found: None.into(),
+                        })
+                    } else {
+                        e
+                    }
+                })
+                .validate(|(content, _): (&str, ()), extras, emit| {
+                    let span = Span::from(extras.span());
+                    // Note: span covers content + closing """# (the # count matches opening)
+                    // Content is at span.start to span.end - 3 - hash_count
+                    let hash_num = *extras.ctx();
+
+                    match dedent_multiline_string(content) {
+                        Ok((dedented, _indent_len)) => dedented.into(),
+                        Err(e) => {
+                            let (label, error_span, message) = match e {
+                                MultilineStringError::NoOpeningNewline => (
+                                    "must be followed by newline",
+                                    span.before_start(hash_num + 3),
+                                    "opening delimiter must be immediately followed by a newline",
+                                ),
+                                MultilineStringError::ClosingNotOnOwnLine => (
+                                    "must be on its own line",
+                                    // Point to closing """ (at content_len offset, length 3)
+                                    Span(span.1 - 3 - hash_num, span.1),
+                                    "closing delimiter must be on its own line with only whitespace prefix",
+                                ),
+                                MultilineStringError::InsufficientIndent { offset, length } => (
+                                    "insufficient indentation",
+                                    // Offset is within content, which starts at span.0
+                                    Span(span.0 + offset, span.0 + offset + length),
+                                    "line must start with the same whitespace as the closing delimiter",
+                                ),
+                            };
+                            emit.emit(ParseError::Message {
+                                label: Some(label),
+                                span: error_span,
+                                message: message.to_string(),
+                            });
+                            // Return empty string as error recovery
+                            "".into()
+                        }
+                    }
+                }),
+        )
 }
 
 fn esc_char<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
@@ -269,40 +699,43 @@ fn esc_char<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
 }
 
 fn escaped_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
-    just('"').ignore_then(
-        choice((
-            none_of(['"', '\\']),
-            just('\\').ignore_then(esc_char()),
-            // ws-escape
-            just('\\')
-                .then(ws_char().or(newline()).repeated().at_least(1))
-                .map(|_| ' '),
-        ))
-        .repeated()
-        .collect::<String>()
-        .then_ignore(just('"'))
-        .map(|val| val.into())
-        .map_err_with_state(|e: ParseError, span, _state| {
-            if matches!(
-                &e,
-                ParseError::Unexpected {
-                    found: TokenFormat::Eoi,
-                    ..
+    // Single quote only - reject """ which is multi-line syntax
+    just('"')
+        .then_ignore(just("\"\"").not().rewind())
+        .ignore_then(
+            choice((
+                none_of(['"', '\\']),
+                just('\\').ignore_then(esc_char()),
+                // ws-escape
+                just('\\')
+                    .then(ws_char().or(newline()).repeated().at_least(1))
+                    .map(|_| ' '),
+            ))
+            .repeated()
+            .collect::<String>()
+            .then_ignore(just('"'))
+            .map(|val| val.into())
+            .map_err_with_state(|e: ParseError, span, _state| {
+                if matches!(
+                    &e,
+                    ParseError::Unexpected {
+                        found: TokenFormat::Eoi,
+                        ..
+                    }
+                ) {
+                    e.merge(ParseError::Unclosed {
+                        label: "string",
+                        opened_at: Span::from(span).before_start(1),
+                        opened: '"'.into(),
+                        expected_at: Span::from(span).at_end(),
+                        expected: '"'.into(),
+                        found: None.into(),
+                    })
+                } else {
+                    e
                 }
-            ) {
-                e.merge(ParseError::Unclosed {
-                    label: "string",
-                    opened_at: Span::from(span).before_start(1),
-                    opened: '"'.into(),
-                    expected_at: Span::from(span).at_end(),
-                    expected: '"'.into(),
-                    found: None.into(),
-                })
-            } else {
-                e
-            }
-        }),
-    )
+            }),
+        )
 }
 
 fn bare_ident<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
@@ -1167,6 +1600,547 @@ mod test {
                 "related": []
             }]
         }"####
+        );
+    }
+
+    #[test]
+    fn parse_multiline_str() {
+        // Basic multi-line quoted string
+        assert_eq!(
+            &*parse(string(), "\"\"\"\n    hello\n    \"\"\"").unwrap(),
+            "hello"
+        );
+
+        // Multi-line string with dedentation
+        assert_eq!(
+            &*parse(string(), "\"\"\"\n    line1\n    line2\n    \"\"\"").unwrap(),
+            "line1\nline2"
+        );
+
+        // Multi-line string with no indent
+        assert_eq!(
+            &*parse(string(), "\"\"\"\nline1\nline2\n\"\"\"").unwrap(),
+            "line1\nline2"
+        );
+
+        // Empty multi-line string
+        assert_eq!(&*parse(string(), "\"\"\"\n\"\"\"").unwrap(), "");
+
+        // Multi-line string with escape sequences
+        assert_eq!(
+            &*parse(string(), "\"\"\"\n    hello\\nworld\n    \"\"\"").unwrap(),
+            "hello\nworld"
+        );
+
+        // Multi-line string with one or two quotes (not three)
+        assert_eq!(
+            &*parse(string(), "\"\"\"\n    say \"hi\"\n    \"\"\"").unwrap(),
+            "say \"hi\""
+        );
+        assert_eq!(
+            &*parse(string(), "\"\"\"\n    say \"\"hi\"\"\n    \"\"\"").unwrap(),
+            "say \"\"hi\"\""
+        );
+
+        // Multi-line string with whitespace-only lines (become empty)
+        assert_eq!(
+            &*parse(string(), "\"\"\"\n    line1\n    \n    line2\n    \"\"\"").unwrap(),
+            "line1\n\nline2"
+        );
+    }
+
+    #[test]
+    fn parse_multiline_raw_str() {
+        // Basic multi-line raw string
+        assert_eq!(
+            &*parse(string(), "#\"\"\"\n    hello\n    \"\"\"#").unwrap(),
+            "hello"
+        );
+
+        // Multi-line raw string with multiple hashes
+        assert_eq!(
+            &*parse(string(), "##\"\"\"\n    hello\n    \"\"\"##").unwrap(),
+            "hello"
+        );
+
+        // Multi-line raw string preserves backslashes
+        assert_eq!(
+            &*parse(string(), "#\"\"\"\n    hello\\nworld\n    \"\"\"#").unwrap(),
+            "hello\\nworld"
+        );
+
+        // Multi-line raw string with quotes inside
+        assert_eq!(
+            &*parse(string(), "#\"\"\"\n    say \"\"\"hi\"\"\"\n    \"\"\"#").unwrap(),
+            "say \"\"\"hi\"\"\""
+        );
+
+        // Empty multi-line raw string
+        assert_eq!(&*parse(string(), "#\"\"\"\n\"\"\"#").unwrap(), "");
+    }
+
+    #[test]
+    fn parse_multiline_str_crlf() {
+        // CRLF should be normalized to LF
+        assert_eq!(
+            &*parse(string(), "\"\"\"\r\n    hello\r\n    \"\"\"").unwrap(),
+            "hello"
+        );
+        assert_eq!(
+            &*parse(string(), "\"\"\"\r\n    line1\r\n    line2\r\n    \"\"\"").unwrap(),
+            "line1\nline2"
+        );
+    }
+
+    #[test]
+    fn parse_multiline_str_err_no_opening_newline() {
+        // Missing newline after opening delimiter: """hello"""
+        // Points to opening """ (offset 0, length 3)
+        err_eq!(
+            parse(string(), "\"\"\"hello\"\"\""),
+            r#"{
+            "message": "error parsing KDL",
+            "severity": "error",
+            "labels": [],
+            "related": [{
+                "message": "opening delimiter must be immediately followed by a newline",
+                "severity": "error",
+                "filename": "<test>",
+                "labels": [
+                    {"label": "must be followed by newline",
+                    "span": {"offset": 0, "length": 3}}
+                ],
+                "related": []
+            }]
+        }"#
+        );
+    }
+
+    #[test]
+    fn parse_multiline_raw_str_err_no_opening_newline() {
+        // Missing newline after opening delimiter: ##"""hello"""##
+        // Points to opening ##""" (offset 0, length 5)
+        err_eq!(
+            parse(string(), "##\"\"\"hello\"\"\"##"),
+            r#"{
+            "message": "error parsing KDL",
+            "severity": "error",
+            "labels": [],
+            "related": [{
+                "message": "opening delimiter must be immediately followed by a newline",
+                "severity": "error",
+                "filename": "<test>",
+                "labels": [
+                    {"label": "must be followed by newline",
+                    "span": {"offset": 0, "length": 5}}
+                ],
+                "related": []
+            }]
+        }"#
+        );
+    }
+
+    #[test]
+    fn parse_multiline_str_err_closing_not_on_own_line() {
+        // Closing delimiter not on its own line: """\nhello"""
+        // Points to closing """ (offset 9, length 3)
+        err_eq!(
+            parse(string(), "\"\"\"\nhello\"\"\""),
+            r#"{
+            "message": "error parsing KDL",
+            "severity": "error",
+            "labels": [],
+            "related": [{
+                "message": "closing delimiter must be on its own line with only whitespace prefix",
+                "severity": "error",
+                "filename": "<test>",
+                "labels": [
+                    {"label": "must be on its own line",
+                    "span": {"offset": 9, "length": 3}}
+                ],
+                "related": []
+            }]
+        }"#
+        );
+    }
+
+    #[test]
+    fn parse_multiline_raw_str_err_closing_not_on_own_line() {
+        // Closing delimiter not on its own line: ##"""\nhello"""##
+        // Points to closing """## (offset 11, length 5)
+        err_eq!(
+            parse(string(), "##\"\"\"\nhello\"\"\"##"),
+            r#"{
+            "message": "error parsing KDL",
+            "severity": "error",
+            "labels": [],
+            "related": [{
+                "message": "closing delimiter must be on its own line with only whitespace prefix",
+                "severity": "error",
+                "filename": "<test>",
+                "labels": [
+                    {"label": "must be on its own line",
+                    "span": {"offset": 11, "length": 5}}
+                ],
+                "related": []
+            }]
+        }"#
+        );
+    }
+
+    #[test]
+    fn parse_multiline_str_err_insufficient_indent() {
+        // Insufficient indentation with non-ASCII whitespace: """\n    hello\n\u{00a0}\u{00a0}world\n    """
+        // Uses two non-breaking spaces (\u{00a0}, 2 bytes each in UTF-8) as the bad indentation
+        // Points to the whitespace prefix (offset 14, length 4 bytes)
+        err_eq!(
+            parse(
+                string(),
+                "\"\"\"\n    hello\n\u{00a0}\u{00a0}world\n    \"\"\""
+            ),
+            r#"{
+            "message": "error parsing KDL",
+            "severity": "error",
+            "labels": [],
+            "related": [{
+                "message": "line must start with the same whitespace as the closing delimiter",
+                "severity": "error",
+                "filename": "<test>",
+                "labels": [
+                    {"label": "insufficient indentation",
+                    "span": {"offset": 14, "length": 4}}
+                ],
+                "related": []
+            }]
+        }"#
+        );
+    }
+
+    #[test]
+    fn triple_quote_not_single_line() {
+        // """ should not be parsed as a single-line string
+        // It is treated as a multi-line string opening, which then fails due to missing structure
+        err_eq!(
+            parse(string(), "\"\"\""),
+            r#"{
+            "message": "error parsing KDL",
+            "severity": "error",
+            "labels": [],
+            "related": [{
+                "message": "unclosed multi-line string `\"\"\"`",
+                "severity": "error",
+                "filename": "<test>",
+                "labels": [
+                    {"label": "opened here",
+                    "span": {"offset": 0, "length": 3}},
+                    {"label": "expected `\"\"\"`",
+                    "span": {"offset": 3, "length": 0}}
+                ],
+                "related": []
+            }]
+        }"#
+        );
+    }
+
+    #[test]
+    fn hash_triple_quote_is_multiline() {
+        // #"""# should be treated as invalid multi-line raw string, not as single-line with content ""
+        // The old behavior was: #"""# = single-line raw string with content """
+        // The new behavior is: #"""...."""# is multi-line, so #"""# without proper structure is an error
+        err_eq!(
+            parse(string(), "#\"\"\"#"),
+            r##"{
+            "message": "error parsing KDL",
+            "severity": "error",
+            "labels": [],
+            "related": [{
+                "message": "unclosed multi-line raw string `#\"\"\"`",
+                "severity": "error",
+                "filename": "<test>",
+                "labels": [
+                    {"label": "opened here",
+                    "span": {"offset": 0, "length": 4}},
+                    {"label": "expected `\"\"\"#`",
+                    "span": {"offset": 5, "length": 0}}
+                ],
+                "related": []
+            }]
+        }"##
+        );
+    }
+
+    #[test]
+    fn parse_multiline_str_err_expected_brace_after_u() {
+        // \u without { in multi-line string - points to \uA (the wrong char after \u)
+        err_eq!(
+            parse(string(), "\"\"\"\n\\uABCD\n\"\"\""),
+            r#"{
+            "message": "error parsing KDL",
+            "severity": "error",
+            "labels": [],
+            "related": [{
+                "message": "expected '{' after \\u",
+                "severity": "error",
+                "filename": "<test>",
+                "labels": [
+                    {"label": "invalid escape sequence",
+                    "span": {"offset": 4, "length": 3}}
+                ],
+                "related": []
+            }]
+        }"#
+        );
+    }
+
+    #[test]
+    fn parse_multiline_str_err_expected_brace_after_u_eoi() {
+        // \u without { in multi-line string - points to \uA (the wrong char after \u)
+        err_eq!(
+            parse(string(), "\"\"\"\n\\u\n\"\"\""),
+            r#"{
+            "message": "error parsing KDL",
+            "severity": "error",
+            "labels": [],
+            "related": [{
+                "message": "expected '{' after \\u",
+                "severity": "error",
+                "filename": "<test>",
+                "labels": [
+                    {"label": "invalid escape sequence",
+                    "span": {"offset": 4, "length": 2}}
+                ],
+                "related": []
+            }]
+        }"#
+        );
+    }
+
+    #[test]
+    fn parse_multiline_str_err_unicode_escape_too_long() {
+        // More than 6 hex digits in unicode escape - spans the whole escape including excess digit
+        err_eq!(
+            parse(string(), "\"\"\"\n\\u{1234567}\n\"\"\""),
+            r#"{
+            "message": "error parsing KDL",
+            "severity": "error",
+            "labels": [],
+            "related": [{
+                "message": "unicode escape too long",
+                "severity": "error",
+                "filename": "<test>",
+                "labels": [
+                    {"label": "invalid escape sequence",
+                    "span": {"offset": 4, "length": 10}}
+                ],
+                "related": []
+            }]
+        }"#
+        );
+    }
+
+    #[test]
+    fn parse_multiline_str_err_invalid_char_in_unicode_escape() {
+        // Invalid character 'g' in unicode escape - spans up to and including the invalid char
+        err_eq!(
+            parse(string(), "\"\"\"\n\\u{12gh}\n\"\"\""),
+            r#"{
+            "message": "error parsing KDL",
+            "severity": "error",
+            "labels": [],
+            "related": [{
+                "message": "invalid character 'g' in unicode escape",
+                "severity": "error",
+                "filename": "<test>",
+                "labels": [
+                    {"label": "invalid escape sequence",
+                    "span": {"offset": 4, "length": 6}}
+                ],
+                "related": []
+            }]
+        }"#
+        );
+    }
+
+    #[test]
+    fn parse_multiline_str_err_unclosed_unicode_escape() {
+        // Unclosed unicode escape - \u{1234 without closing }
+        err_eq!(
+            parse(string(), "\"\"\"\n\\u{1234\n\"\"\""),
+            r#"{
+            "message": "error parsing KDL",
+            "severity": "error",
+            "labels": [],
+            "related": [{
+                "message": "unclosed unicode escape",
+                "severity": "error",
+                "filename": "<test>",
+                "labels": [
+                    {"label": "invalid escape sequence",
+                    "span": {"offset": 4, "length": 7}}
+                ],
+                "related": []
+            }]
+        }"#
+        );
+    }
+
+    #[test]
+    fn parse_multiline_str_err_empty_unicode_escape() {
+        // Empty unicode escape \u{} - spans the whole escape
+        err_eq!(
+            parse(string(), "\"\"\"\n\\u{}\n\"\"\""),
+            r#"{
+            "message": "error parsing KDL",
+            "severity": "error",
+            "labels": [],
+            "related": [{
+                "message": "empty unicode escape",
+                "severity": "error",
+                "filename": "<test>",
+                "labels": [
+                    {"label": "invalid escape sequence",
+                    "span": {"offset": 4, "length": 4}}
+                ],
+                "related": []
+            }]
+        }"#
+        );
+    }
+
+    #[test]
+    fn parse_multiline_str_err_invalid_unicode_code_point() {
+        // Invalid unicode code point (surrogate) - spans the whole escape
+        err_eq!(
+            parse(string(), "\"\"\"\n\\u{D800}\n\"\"\""),
+            r#"{
+            "message": "error parsing KDL",
+            "severity": "error",
+            "labels": [],
+            "related": [{
+                "message": "invalid unicode code point: 55296",
+                "severity": "error",
+                "filename": "<test>",
+                "labels": [
+                    {"label": "invalid escape sequence",
+                    "span": {"offset": 4, "length": 8}}
+                ],
+                "related": []
+            }]
+        }"#
+        );
+    }
+
+    #[test]
+    fn parse_multiline_str_err_invalid_escape_char() {
+        // Invalid escape character \x - spans the backslash and invalid char
+        err_eq!(
+            parse(string(), "\"\"\"\n\\x01\n\"\"\""),
+            r#"{
+            "message": "error parsing KDL",
+            "severity": "error",
+            "labels": [],
+            "related": [{
+                "message": "invalid escape character: 'x'",
+                "severity": "error",
+                "filename": "<test>",
+                "labels": [
+                    {"label": "invalid escape sequence",
+                    "span": {"offset": 4, "length": 2}}
+                ],
+                "related": []
+            }]
+        }"#
+        );
+    }
+
+    #[test]
+    fn parse_multiline_str_err_trailing_backslash() {
+        // Trailing backslash at end of content - spans just the backslash
+        err_eq!(
+            parse(string(), "\"\"\"\nhello\\\n\"\"\""),
+            r#"{
+            "message": "error parsing KDL",
+            "severity": "error",
+            "labels": [],
+            "related": [{
+                "message": "trailing backslash",
+                "severity": "error",
+                "filename": "<test>",
+                "labels": [
+                    {"label": "invalid escape sequence",
+                    "span": {"offset": 9, "length": 1}}
+                ],
+                "related": []
+            }]
+        }"#
+        );
+    }
+
+    #[test]
+    fn parse_multiline_str_err_second_line() {
+        // Error on second line of multi-line string
+        // Input: """\n    line1\n    \x01\n    """
+        // The \x is at source offset 18-19 (after """, newline, indent, line1, newline, indent)
+        // With correct span calculation, offset should be 18, length 2
+        err_eq!(
+            parse(string(), "\"\"\"\n    line1\n    \\x01\n    \"\"\""),
+            r#"{
+            "message": "error parsing KDL",
+            "severity": "error",
+            "labels": [],
+            "related": [{
+                "message": "invalid escape character: 'x'",
+                "severity": "error",
+                "filename": "<test>",
+                "labels": [
+                    {"label": "invalid escape sequence",
+                    "span": {"offset": 18, "length": 2}}
+                ],
+                "related": []
+            }]
+        }"#
+        );
+    }
+
+    #[test]
+    fn parse_multiline_str_err_non_ascii_indent() {
+        // Test with non-ASCII whitespace in indentation
+        // Both content line and closing line use: ASCII space + non-breaking space (U+00A0)
+        // This verifies byte-based indent_len works correctly with multi-byte whitespace
+        //
+        // Byte layout:
+        // - bytes 0-2: """
+        // - byte 3: \n
+        // - byte 4: ASCII space
+        // - bytes 5-6: U+00A0 (NBSP, 2 bytes in UTF-8)
+        // - bytes 7-11: hello
+        // - byte 12: \
+        // - byte 13: x
+        // - bytes 14-15: 01
+        // - byte 16: \n
+        // - byte 17: ASCII space
+        // - bytes 18-19: U+00A0
+        // - bytes 20-22: """
+        //
+        // indent_len = 3 bytes (1 space + 2 for NBSP)
+        // The \x escape error should be at source offset 12, length 2
+        err_eq!(
+            parse(string(), "\"\"\"\n \u{00A0}hello\\x01\n \u{00A0}\"\"\""),
+            r#"{
+            "message": "error parsing KDL",
+            "severity": "error",
+            "labels": [],
+            "related": [{
+                "message": "invalid escape character: 'x'",
+                "severity": "error",
+                "filename": "<test>",
+                "labels": [
+                    {"label": "invalid escape sequence",
+                    "span": {"offset": 12, "length": 2}}
+                ],
+                "related": []
+            }]
+        }"#
         );
     }
 
