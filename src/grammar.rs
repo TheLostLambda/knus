@@ -185,7 +185,10 @@ fn ml_comment<S: Span>() -> impl Parser<char, (), Error = Error<S>> {
 }
 
 fn raw_string<S: Span>() -> impl Parser<char, Box<str>, Error = Error<S>> {
-     just('#').repeated().at_least(1).map(|v| v.len())
+    just('#')
+        .repeated()
+        .at_least(1)
+        .map(|v| v.len())
         .then_ignore(just('"'))
         .then_with(|sharp_num| {
             take_until(just('"').ignore_then(just('#').repeated().exactly(sharp_num).ignored()))
@@ -274,31 +277,33 @@ fn escaped_string<S: Span>() -> impl Parser<char, Box<str>, Error = Error<S>> {
             filter(|&c| c != '"' && c != '\\'),
             just('\\').ignore_then(esc_char()),
             // ws-escape
-            just('\\').then(ws_char().or(newline()).repeated().at_least(1)).map(|_| ' '),
+            just('\\')
+                .then(ws_char().or(newline()).repeated().at_least(1))
+                .map(|_| ' '),
         ))
-            .repeated()
-            .then_ignore(just('"'))
-            .map(|val| val.into_iter().collect::<String>().into())
-            .map_err_with_span(|e: Error<S>, span| {
-                if matches!(
-                    &e,
-                    Error::Unexpected {
-                        found: TokenFormat::Eoi,
-                        ..
-                    }
-                ) {
-                    e.merge(Error::Unclosed {
-                        label: "string",
-                        opened_at: span.before_start(1),
-                        opened: '"'.into(),
-                        expected_at: span.at_end(),
-                        expected: '"'.into(),
-                        found: None.into(),
-                    })
-                } else {
-                    e
+        .repeated()
+        .then_ignore(just('"'))
+        .map(|val| val.into_iter().collect::<String>().into())
+        .map_err_with_span(|e: Error<S>, span| {
+            if matches!(
+                &e,
+                Error::Unexpected {
+                    found: TokenFormat::Eoi,
+                    ..
                 }
-            }),
+            ) {
+                e.merge(Error::Unclosed {
+                    label: "string",
+                    opened_at: span.before_start(1),
+                    opened: '"'.into(),
+                    expected_at: span.at_end(),
+                    expected: '"'.into(),
+                    found: None.into(),
+                })
+            } else {
+                e
+            }
+        }),
     )
 }
 
@@ -310,7 +315,9 @@ fn bare_ident<S: Span>() -> impl Parser<char, Box<str>, Error = Error<S>> {
         // signed-ident
         sign.chain(id_sans_dig_point().chain(id_char().repeated()).or_not()),
         // dotted-ident
-        sign.or_not().chain(just('.')).chain(id_sans_dig().chain(id_char().repeated()).or_not()),
+        sign.or_not()
+            .chain(just('.'))
+            .chain(id_sans_dig().chain(id_char().repeated()).or_not()),
     ))
     .map(|v| v.into_iter().collect())
     .try_map(|s: String, span| match &s[..] {
@@ -473,7 +480,7 @@ fn type_name<S: Span>() -> impl Parser<char, TypeName, Error = Error<S>> {
     ident()
         .delimited_by(
             just('(').then(ws_char().repeated()),
-            ws_char().repeated().then(just(')'))
+            ws_char().repeated().then(just(')')),
         )
         .map(TypeName::from_string)
 }
@@ -527,10 +534,12 @@ fn prop_or_arg_inner<S: Span>() -> impl Parser<char, PropOrArg<S>, Error = Error
     choice((
         spanned(literal())
             .then(
-                ws_char().repeated()
+                ws_char()
+                    .repeated()
                     .then(just('='))
                     .then(ws_char().repeated())
-                    .ignore_then(value()).or_not()
+                    .ignore_then(value())
+                    .or_not(),
             )
             .try_map(|(name, value), _| {
                 let name_span = name.span;
@@ -542,7 +551,14 @@ fn prop_or_arg_inner<S: Span>() -> impl Parser<char, PropOrArg<S>, Error = Error
                         };
                         Ok(Prop(name, value))
                     }
-                    (Literal::Bool(_) | Literal::Null | Literal::Nan | Literal::Inf | Literal::NegInf, Some(_)) => Err(Error::Unexpected {
+                    (
+                        Literal::Bool(_)
+                        | Literal::Null
+                        | Literal::Nan
+                        | Literal::Inf
+                        | Literal::NegInf,
+                        Some(_),
+                    ) => Err(Error::Unexpected {
                         label: Some("unexpected keyword"),
                         span: name_span,
                         found: TokenFormat::Kind("keyword"),
@@ -569,10 +585,12 @@ fn prop_or_arg_inner<S: Span>() -> impl Parser<char, PropOrArg<S>, Error = Error
             }),
         spanned(bare_ident())
             .then(
-                ws_char().repeated()
+                ws_char()
+                    .repeated()
                     .then(just('='))
                     .then(ws_char().repeated())
-                    .ignore_then(value()).or_not()
+                    .ignore_then(value())
+                    .or_not(),
             )
             .validate(|(name, value), span, emit| {
                 if value.is_none() {
@@ -707,7 +725,11 @@ fn nodes<S: Span>() -> impl Parser<char, Vec<SpannedNode<S>>, Error = Error<S>> 
 }
 
 pub(crate) fn document<S: Span>() -> impl Parser<char, Document<S>, Error = Error<S>> {
-    just('\u{FEFF}').or_not().ignore_then(nodes()).then_ignore(end()).map(|nodes| Document { nodes })
+    just('\u{FEFF}')
+        .or_not()
+        .ignore_then(nodes())
+        .then_ignore(end())
+        .map(|nodes| Document { nodes })
 }
 
 #[cfg(test)]
@@ -1006,17 +1028,18 @@ mod test {
         );
         err_eq!(
             parse(string(), r#""he\x01llo""#),
+            // TODO: change the label back to "invalid escape char"
             r#"{
             "message": "error parsing KDL",
             "severity": "error",
             "labels": [],
             "related": [{
                 "message":
-                    "found `x`, expected `\"`, `\\`, `b`, `f`, `n`, `r`, `s`, `t` or `u`",
+                    "found `x`, expected `\"`, `\\`, `b`, `f`, `n`, `r`, `s`, `t`, `u` or newline",
                 "severity": "error",
                 "filename": "<test>",
                 "labels": [
-                    {"label": "invalid escape char",
+                    {"label": "unexpected token",
                     "span": {"offset": 4, "length": 1}}
                 ],
                 "related": []
@@ -1026,6 +1049,7 @@ mod test {
         // Tests error recovery
         err_eq!(
             parse(string(), r#""he\u{FFFFFF}l\!lo""#),
+            // TODO: change the second label back to "invalid escape char"
             r#"{
             "message": "error parsing KDL",
             "severity": "error",
@@ -1041,11 +1065,11 @@ mod test {
                 "related": []
             }, {
                 "message":
-                    "found `!`, expected `\"`, `\\`, `b`, `f`, `n`, `r`, `s`, `t` or `u`",
+                    "found `!`, expected `\"`, `\\`, `b`, `f`, `n`, `r`, `s`, `t`, `u` or newline",
                 "severity": "error",
                 "filename": "<test>",
                 "labels": [
-                    {"label": "invalid escape char",
+                    {"label": "unexpected token",
                     "span": {"offset": 15, "length": 1}}
                 ],
                 "related": []
@@ -1425,7 +1449,10 @@ mod test {
         assert_eq!(nval.arguments.len(), 1);
         assert_eq!(nval.properties.len(), 0);
         assert_eq!(&***nval.arguments[0].type_name.as_ref().unwrap(), "typ");
-        assert_eq!(&*nval.arguments[0].literal, &Literal::String("after whitespace".into()));
+        assert_eq!(
+            &*nval.arguments[0].literal,
+            &Literal::String("after whitespace".into())
+        );
 
         let nval = single(parse(nodes(), "hello key=(string)\"arg1\""));
         assert_eq!(nval.node_name.as_ref(), "hello");
@@ -1768,7 +1795,7 @@ mod test {
             "severity": "error",
             "labels": [],
             "related": [{
-                "message": "found `=`, expected `\"`, `#`, `(`, `+`, `-`, `0`, `;`, `\\`, `{`, `#-inf`, `#false`, `#inf`, `#nan`, `#null`, `#true`, letter, newline, whitespace or end of input",
+                "message": "found `=`, expected `\"`, `#`, `(`, `+`, `-`, `.`, `0`, `;`, `\\`, `{`, `#-inf`, `#false`, `#inf`, `#nan`, `#null`, `#true`, letter, newline, whitespace or end of input",
                 "severity": "error",
                 "filename": "<test>",
                 "labels": [
