@@ -868,11 +868,9 @@ struct ResourceRecord {
 }
 
 #[derive(knus_derive::Decode, Debug, PartialEq)]
-struct OptionalResourceRecord {
-    #[knus(argument)]
-    name: String,
+struct ResourceRecordOnlyType {
     #[knus(child(from_enum))]
-    r#type: Option<RecordType>,
+    r#type: RecordType,
 }
 
 #[derive(knus_derive::Decode, Debug, PartialEq)]
@@ -904,7 +902,7 @@ fn parse_child_enum() {
     // Error: missing child
     assert_eq!(
         parse_err::<ResourceRecord>(r#"rr "example.com""#),
-        "single child node is required"
+        "exactly one child node is required"
     );
 
     // Error: unknown child node name
@@ -916,28 +914,21 @@ fn parse_child_enum() {
     // Error: duplicate child
     assert_eq!(
         parse_err::<ResourceRecord>(r#"rr "example.com" { a "192.0.2.1"; aaaa "2001:db8::1"; }"#),
-        "duplicate node, single child expected"
+        "unexpected node; single child expected"
     );
 }
 
 #[test]
-fn parse_optional_child_enum() {
-    // With enum child present
+fn parse_child_enum_no_args() {
     assert_eq!(
-        parse::<OptionalResourceRecord>(r#"rr "example.com" { a "192.0.2.1"; }"#),
-        OptionalResourceRecord {
-            name: "example.com".into(),
-            r#type: Some(RecordType::A("192.0.2.1".into())),
+        parse_doc::<ResourceRecordOnlyType>(r#"a "192.0.2.1""#),
+        ResourceRecordOnlyType {
+            r#type: RecordType::A("192.0.2.1".into()),
         }
     );
-
-    // Without enum child
     assert_eq!(
-        parse::<OptionalResourceRecord>(r#"rr "example.com""#),
-        OptionalResourceRecord {
-            name: "example.com".into(),
-            r#type: None,
-        }
+        parse_doc_err::<ResourceRecordOnlyType>("a \"192.0.2.1\"\na \"192.0.2.1\""),
+        "unexpected node; single child expected"
     );
 }
 

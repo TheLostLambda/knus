@@ -664,26 +664,6 @@ fn insert_child(s: &Common, node: &syn::Ident) -> syn::Result<TokenStream> {
                     Ok(true)
                 }
             });
-        } else if matches!(child_def.mode, ChildMode::Enum) {
-            let dup_err = "duplicate node, single child expected";
-            let value = syn::Ident::new("value", Span::mixed_site());
-            match_branches.push(quote! {
-                _ => {
-                    match ::knus::Decode::decode_node(#node, #ctx) {
-                        Ok(#value) => {
-                            if #dest.is_some() {
-                                #ctx.emit_error(
-                                    ::knus::errors::DecodeError::unexpected(
-                                        &#node.node_name, "node", #dup_err));
-                            } else {
-                                #dest = Some(#value);
-                            }
-                            Ok(true)
-                        }
-                        Err(e) => Err(e),
-                    }
-                }
-            });
         } else {
             let dup_err = format!(
                 "duplicate node `{}`, single node expected",
@@ -899,66 +879,11 @@ fn decode_children(
                     }
                 });
             }
-            ChildMode::Enum => {
-                // For enum children, we use a wildcard match and let the enum's
-                // decode_node implementation handle the node name matching.
-                declare_empty.push(quote! {
-                    let mut #fld = None;
-                });
-                let dup_err = "duplicate node, single child expected";
-                let value = syn::Ident::new("value", Span::mixed_site());
-                match_branches.push(quote! {
-                    _ => {
-                        match ::knus::Decode::decode_node(#child, #ctx) {
-                            Ok(#value) => {
-                                if #fld.is_some() {
-                                    Some(Err(
-                                        ::knus::errors::DecodeError::unexpected(
-                                            &#child.node_name, "node", #dup_err)))
-                                } else {
-                                    #fld = Some(#value);
-                                    None
-                                }
-                            }
-                            Err(e) => Some(Err(e)),
-                        }
-                    }
-                });
-                let req_msg = "single child node is required";
-                if let Some(default_value) = &child_def.default {
-                    let default = if let Some(expr) = default_value {
-                        quote!(#expr)
-                    } else {
-                        quote!(::std::default::Default::default())
-                    };
-                    postprocess.push(quote! {
-                        let #fld = #fld.unwrap_or_else(|| #default);
-                    });
-                } else if !child_def.option {
-                    if let Some(span) = &err_span {
-                        postprocess.push(quote! {
-                            let #fld = #fld.ok_or_else(|| {
-                                ::knus::errors::DecodeError::Missing {
-                                    span: #span.clone(),
-                                    message: #req_msg.into(),
-                                }
-                            })?;
-                        });
-                    } else {
-                        postprocess.push(quote! {
-                            let #fld = #fld.ok_or_else(|| {
-                                ::knus::errors::DecodeError::MissingNode {
-                                    message: #req_msg.into(),
-                                }
-                            })?;
-                        });
-                    }
-                }
-            }
         }
     }
     if let Some(var_children) = &s.object.var_children {
         let fld = &var_children.field.tmp_name;
+        let exactly_one: bool = var_children.exactly_one;
 
         let (init, func) = if let Some(unwrap) = &var_children.unwrap {
             let func = format_ident!("unwrap_{}", fld, span = Span::mixed_site());
@@ -966,6 +891,44 @@ fn decode_children(
             (unwrap_fn, quote!(#func))
         } else {
             (quote!(), quote!(::knus::Decode::decode_node))
+        };
+
+        // Code to unwrap the vector if exactly_one is set
+        let move_out_of_vec = if exactly_one {
+            let missing_err = if let Some(span) = &err_span {
+                quote! {
+                    return Err(::knus::errors::DecodeError::Missing {
+                        span: *#span,
+                        message: "exactly one child node is required".to_string(),
+                    });
+                }
+            } else {
+                quote! {
+                    return Err(::knus::errors::DecodeError::MissingNode {
+                        message: "exactly one child node is required".to_string(),
+                    });
+                }
+            };
+            quote! {
+                let #fld = match <[_; 1]>::try_from(child_vec) {
+                    Ok([child]) => child,
+                    Err(child_vec) => {
+                        if child_vec.len() == 0 {
+                            #missing_err
+                        } else {
+                            return Err(::knus::errors::DecodeError::Unexpected {
+                                span: *#children.last().unwrap().span(),
+                                kind: "child node",
+                                message: "unexpected node; single child expected".to_string(),
+                            });
+                        }
+                    }
+                };
+            }
+        } else {
+            quote! {
+                let #fld = child_vec;
+            }
         };
 
         match_branches.push(quote! {
@@ -979,11 +942,12 @@ fn decode_children(
         });
         Ok(quote! {
             #(#declare_empty)*
-            let #fld = #children.iter().flat_map(|#child| {
+            let child_vec: Vec<_> = #children.iter().flat_map(|#child| {
                 match &**#child.node_name {
                     #(#match_branches)*
                 }
             }).collect::<::std::result::Result<_, ::knus::errors::DecodeError>>()?;
+            #move_out_of_vec
             #(#postprocess)*
         })
     } else {

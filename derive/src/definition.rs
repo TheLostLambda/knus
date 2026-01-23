@@ -141,7 +141,6 @@ pub enum ChildMode {
     Flatten,
     Multi,
     Bool,
-    Enum,
 }
 
 pub struct Child {
@@ -156,6 +155,7 @@ pub struct Child {
 pub struct VarChildren {
     pub field: Field,
     pub unwrap: Option<Box<FieldAttrs>>,
+    pub exactly_one: bool,
 }
 
 pub enum ExtraKind {
@@ -452,14 +452,10 @@ impl StructBuilder {
                     ));
                 }
                 if *from_enum {
-                    // child(enum) doesn't need a name - it matches by enum variant names
-                    self.children.push(Child {
-                        name: String::new(), // unused for ChildMode::Enum
+                    self.var_children = Some(VarChildren {
                         field,
-                        option: is_option,
-                        mode: ChildMode::Enum,
                         unwrap: attrs.unwrap.clone(),
-                        default: attrs.default.clone(),
+                        exactly_one: true,
                     });
                 } else {
                     let name = match &field.attr {
@@ -519,6 +515,7 @@ impl StructBuilder {
                 self.var_children = Some(VarChildren {
                     field,
                     unwrap: attrs.unwrap.clone(),
+                    exactly_one: false,
                 });
             }
             Some(FieldMode::Flatten(flatten)) => {
