@@ -928,7 +928,6 @@ mod test {
 
     #[test]
     fn parse_str() {
-        //assert_eq!(&*parse(string(), r#"hello"#).unwrap(), "hello");
         assert_eq!(&*parse(string(), r#""hello""#).unwrap(), "hello");
         assert_eq!(&*parse(string(), r#""""#).unwrap(), "");
         assert_eq!(&*parse(string(), r#""hel\"lo""#).unwrap(), "hel\"lo");
@@ -1604,6 +1603,27 @@ mod test {
                     "span": {"offset": 5, "length": 1}},
                     {"label": "expected `}`",
                     "span": {"offset": 6, "length": 0}}
+                ],
+                "related": []
+            }]
+        }"#
+        );
+
+        err_eq!(
+            parse(nodes(), "hello world {"),
+            r#"{
+            "message": "error parsing KDL",
+            "severity": "error",
+            "labels": [],
+            "related": [{
+                "message": "unclosed curly braces `{`",
+                "severity": "error",
+                "filename": "<test>",
+                "labels": [
+                    {"label": "opened here",
+                    "span": {"offset": 12, "length": 1}},
+                    {"label": "expected `}`",
+                    "span": {"offset": 13, "length": 0}}
                 ],
                 "related": []
             }]
