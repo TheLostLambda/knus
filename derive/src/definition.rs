@@ -1,8 +1,8 @@
 use std::fmt;
 use std::mem;
 
-use proc_macro2::{Span, TokenStream};
 use proc_macro_error2::emit_error;
+use proc_macro2::{Span, TokenStream};
 use quote::quote;
 use syn::ext::IdentExt;
 use syn::parse::{Parse, ParseStream};
@@ -22,8 +22,8 @@ pub enum Definition {
 pub enum VariantKind {
     Unit,
     Nested { option: bool },
-    Tuple(Struct),
-    Named,
+    Tuple(Box<Struct>),
+    Named(Box<Struct>),
 }
 
 pub enum ArgKind {
@@ -296,7 +296,15 @@ impl Enum {
                 continue;
             }
             let kind = match var.fields {
-                syn::Fields::Named(_) => VariantKind::Named,
+                syn::Fields::Named(n) => {
+                    let tup = Struct::new(
+                        var.ident.clone(),
+                        trait_props.clone(),
+                        generics.clone(),
+                        n.named.into_iter(),
+                    )?;
+                    VariantKind::Named(Box::new(tup))
+                }
                 syn::Fields::Unnamed(u) => {
                     let tup = Struct::new(
                         var.ident.clone(),
@@ -315,7 +323,7 @@ impl Enum {
                             option: tup.extra_fields[0].option,
                         }
                     } else {
-                        VariantKind::Tuple(tup)
+                        VariantKind::Tuple(Box::new(tup))
                     }
                 }
                 syn::Fields::Unit => VariantKind::Unit,
@@ -798,7 +806,7 @@ fn parse_attr_list(attrs: &[syn::Attribute]) -> Vec<(Attr, Span)> {
     all
 }
 
-fn parse_attrs(input: ParseStream) -> syn::Result<impl IntoIterator<Item = (Attr, Span)>> {
+fn parse_attrs(input: ParseStream) -> syn::Result<impl IntoIterator<Item = (Attr, Span)> + use<>> {
     Punctuated::<_, syn::Token![,]>::parse_terminated_with(input, Attr::parse)
 }
 

@@ -1,7 +1,7 @@
 [package]
 name = "knus-derive"
-version = "3.2.0"
-edition = "2021"
+version = "3.3.1"
+edition = "2024"
 description = """
     A derive implementation for knus KDL parser
 """
@@ -11,16 +11,19 @@ homepage = "https://github.com/TheLostLambda/knus"
 documentation = "https://docs.rs/knus"
 readme = "README.md"
 
+[lints]
+workspace = true
+
 [lib]
 proc-macro = true
 
 [dependencies]
 heck = { version="0.5.0" }
-syn = { version="2.0.85", features=["full", "extra-traits"] }
-quote = "1.0.37"
-proc-macro2 = "1.0.89"
+syn = { version="2.0.101", features=["full", "extra-traits"] }
+quote = "1.0.40"
+proc-macro2 = "1.0.95"
 proc-macro-error2 = "2.0.1"
 
 [dev-dependencies]
 knus = { path=".." }
-miette = { version="7.2.0", features=["fancy"] }
+miette = { version="7.6.0", features=["fancy"] }

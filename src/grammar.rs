@@ -698,11 +698,7 @@ fn nodes<S: Span>() -> impl Parser<char, Vec<SpannedNode<S>>, Error = Error<S>> 
                 vec.into_iter()
                     .filter_map(
                         |(comment, node)| {
-                            if comment.is_none() {
-                                Some(node)
-                            } else {
-                                None
-                            }
+                            if comment.is_none() { Some(node) } else { None }
                         },
                     )
                     .collect()
@@ -726,7 +722,7 @@ mod test {
     use miette::NamedSource;
 
     macro_rules! err_eq {
-        ($left: expr, $right: expr) => {
+        ($left: expr_2021, $right: expr_2021) => {
             let left = $left.unwrap_err();
             let left: serde_json::Value = serde_json::from_str(&left).unwrap();
             let right: serde_json::Value =

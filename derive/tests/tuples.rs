@@ -2,7 +2,7 @@ use std::fmt;
 
 use miette::Diagnostic;
 
-use knus::{span::Span, Decode};
+use knus::{Decode, span::Span};
 
 #[derive(Debug, Decode, PartialEq)]
 struct Unit;
