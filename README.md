@@ -4,7 +4,8 @@ convenient derive macros.
 # Repo Maintenance
 
 In brief, I'll be around to review and merge PRs, but I may not have much time to fix issues / write code myself.
-Others interested in the Rust-KDL ecosystem might want to help out with `facet-kdl` (which will greatly reduce the burden of maintenance by reusing `kdl-rs`s parsing code and `facet`s derive macro).
+At some point, it might be nice to merge `knus` with the `kdl-rs` reference implementation to significantly reduce the maintenance burden — we could bring the derive macro, they could bring the parser!
+It could also be possible to reuse some of the derive macro machinery from `facet`, but `facet` isn't currently interested in directly supporting KDL.
 
 In the meantime, I'm very happy to take on co-maintainers so that I'm not a single point of failure when it comes to merging PRs.
 That way I can be safely hit by a bus, and the `knus` community can carry on without another fork!
