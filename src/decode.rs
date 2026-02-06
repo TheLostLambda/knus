@@ -8,15 +8,15 @@ use std::fmt;
 
 use crate::ast::{BuiltinType, Literal, SpannedNode, Value};
 use crate::errors::{DecodeError, ExpectedType};
-use crate::traits::{Decode, ErrorSpan};
+use crate::traits::Decode;
 
 /// Context is passed through all the decode operations and can be used for:
 ///
 /// 1. To emit error and proceed (so multiple errors presented to user)
 /// 2. To store and retrieve data in decoders of nodes, scalars and spans
 #[derive(Debug, Default)]
-pub struct Context<S: ErrorSpan> {
-    errors: Vec<DecodeError<S>>,
+pub struct Context {
+    errors: Vec<DecodeError>,
     extensions: HashMap<TypeId, Box<dyn Any>>,
 }
 
@@ -52,7 +52,7 @@ pub enum Kind {
 ///
 /// Used internally by `#[knus(..., bytes)]` attribute. But can be used
 /// manually for implementing [`DecodeScalar`](crate::traits::DecodeScalar).
-pub fn bytes<S: ErrorSpan>(value: &Value<S>, ctx: &mut Context<S>) -> Vec<u8> {
+pub fn bytes(value: &Value, ctx: &mut Context) -> Vec<u8> {
     if let Some(typ) = &value.type_name {
         match typ.as_builtin() {
             Some(&BuiltinType::Base64) => {
@@ -84,7 +84,7 @@ pub fn bytes<S: ErrorSpan>(value: &Value<S>, ctx: &mut Context<S>) -> Vec<u8> {
             }
             _ => {
                 ctx.emit_error(DecodeError::TypeName {
-                    span: typ.span().clone(),
+                    span: *typ.span(),
                     found: Some(typ.value.clone()),
                     expected: ExpectedType::optional(BuiltinType::Base64),
                     rust_type: "bytes",
@@ -109,7 +109,7 @@ pub fn bytes<S: ErrorSpan>(value: &Value<S>, ctx: &mut Context<S>) -> Vec<u8> {
 ///
 /// Used internally by `#[knus(child)] x: bool,`. But can be used
 /// manually for implementing [`DecodeScalar`](crate::traits::DecodeScalar).
-pub fn check_flag_node<S: ErrorSpan>(node: &SpannedNode<S>, ctx: &mut Context<S>) {
+pub fn check_flag_node(node: &SpannedNode, ctx: &mut Context) {
     for arg in &node.arguments {
         ctx.emit_error(DecodeError::unexpected(
             &arg.literal,
@@ -136,10 +136,9 @@ pub fn check_flag_node<S: ErrorSpan>(node: &SpannedNode<S>, ctx: &mut Context<S>
 }
 
 /// Parse single KDL node from AST
-pub fn node<T, S>(ast: &SpannedNode<S>) -> Result<T, Vec<DecodeError<S>>>
+pub fn node<T>(ast: &SpannedNode) -> Result<T, Vec<DecodeError>>
 where
-    T: Decode<S>,
-    S: ErrorSpan,
+    T: Decode,
 {
     let mut ctx = Context::new();
     match Decode::decode_node(ast, &mut ctx) {
@@ -152,8 +151,8 @@ where
     }
 }
 
-impl<S: ErrorSpan> Context<S> {
-    pub(crate) fn new() -> Context<S> {
+impl Context {
+    pub(crate) fn new() -> Context {
         Context {
             errors: Vec::new(),
             extensions: HashMap::new(),
@@ -164,14 +163,14 @@ impl<S: ErrorSpan> Context<S> {
     /// This fails decoding operation similarly to just returning error value.
     /// But unlike result allows returning some dummy value and allows decoder
     /// to proceed so multiple errors are presented to user at the same time.
-    pub fn emit_error(&mut self, err: impl Into<DecodeError<S>>) {
+    pub fn emit_error(&mut self, err: impl Into<DecodeError>) {
         self.errors.push(err.into());
     }
     /// Returns `true` if any errors was emitted into the context
     pub fn has_errors(&self) -> bool {
         !self.errors.is_empty()
     }
-    pub(crate) fn into_errors(self) -> Vec<DecodeError<S>> {
+    pub(crate) fn into_errors(self) -> Vec<DecodeError> {
         self.errors
     }
     /// Set context value

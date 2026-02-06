@@ -1,21 +1,11 @@
-//! Knus can generate two types of span during parsing
-//!
-//! 1. [`Span`] which only tracks byte offset from the start of the source code
-//! 2. [`LineSpan`] which also track line numbers
-//!
-//! This distinction is important during parsing stage as [`Span`] is normally
-//! faster. And [`LineSpan`] is still faster than find out line/column number
-//! for each span separately, and is also more convenient if you need this
-//! information.
+//! Knus produces only a very simple span during parsing:
+//! [`Span`] which only tracks byte offset from the start of the source code
 //!
 //! On the other hand, on the decode stage you can convert your span types into
 //! more elaborate thing that includes file name or can refer to the defaults
 //! as a separate kind of span. See [`traits::DecodeSpan`].
-use std::fmt;
-use std::ops::Range;
-
 use crate::decode::Context;
-use crate::traits;
+use crate::traits::DecodeSpan;
 
 /// Reexport of [miette::SourceSpan] trait that we use for parsing
 pub use miette::SourceSpan as ErrorSpan;
@@ -23,14 +13,14 @@ pub use miette::SourceSpan as ErrorSpan;
 /// Wraps the structure to keep source code span, but also dereference to T
 #[derive(Copy, Clone, Debug, Default)]
 #[cfg_attr(feature = "minicbor", derive(minicbor::Encode, minicbor::Decode))]
-pub struct Spanned<T, S> {
+pub struct Spanned<T> {
     #[cfg_attr(feature = "minicbor", n(0))]
-    pub(crate) span: S,
+    pub(crate) span: Span,
     #[cfg_attr(feature = "minicbor", n(1))]
     pub(crate) value: T,
 }
 
-/// Normal byte offset span
+/// A span based on byte offsets.
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
 #[cfg_attr(feature = "minicbor", derive(minicbor::Encode, minicbor::Decode))]
 pub struct Span(
@@ -38,62 +28,9 @@ pub struct Span(
     #[cfg_attr(feature = "minicbor", n(1))] pub usize,
 );
 
-/// Line and column position of the datum in the source code
-// TODO(tailhook) optimize Eq to check only offset
-#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
-#[cfg_attr(feature = "minicbor", derive(minicbor::Encode, minicbor::Decode))]
-pub struct LinePos {
-    /// Zero-based byte offset
-    #[cfg_attr(feature = "minicbor", n(0))]
-    pub offset: usize,
-    /// Zero-based line number
-    #[cfg_attr(feature = "minicbor", n(1))]
-    pub line: usize,
-    /// Zero-based column number
-    #[cfg_attr(feature = "minicbor", n(2))]
-    pub column: usize,
-}
-
-/// Span with line and column number
-#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
-#[cfg_attr(feature = "minicbor", derive(minicbor::Encode, minicbor::Decode))]
-pub struct LineSpan(
-    #[cfg_attr(feature = "minicbor", n(0))] pub LinePos,
-    #[cfg_attr(feature = "minicbor", n(1))] pub LinePos,
-);
-
-#[allow(missing_debug_implementations)]
-mod sealed {
-
-    pub struct OffsetTracker {
-        pub(crate) offset: usize,
-    }
-
-    #[cfg(feature = "line-numbers")]
-    pub struct LineTracker {
-        pub(crate) offset: usize,
-        pub(crate) caret_return: bool,
-        pub(crate) line: usize,
-        pub(crate) column: usize,
-    }
-}
-
-impl Span {
-    /// Length of the span in bytes
-    pub fn length(&self) -> usize {
-        self.1.saturating_sub(self.0)
-    }
-}
-
 impl From<Span> for ErrorSpan {
     fn from(val: Span) -> Self {
         (val.0, val.1.saturating_sub(val.0)).into()
-    }
-}
-
-impl From<LineSpan> for ErrorSpan {
-    fn from(val: LineSpan) -> Self {
-        (val.0.offset, val.1.offset.saturating_sub(val.0.offset)).into()
     }
 }
 
@@ -101,7 +38,7 @@ impl chumsky::Span for Span {
     type Context = ();
     type Offset = usize;
     fn new(_context: (), range: std::ops::Range<usize>) -> Self {
-        Span(range.start(), range.end())
+        Span(range.start, range.end)
     }
     fn context(&self) {}
     fn start(&self) -> usize {
@@ -111,275 +48,202 @@ impl chumsky::Span for Span {
         self.1
     }
 }
-impl traits::sealed::SpanTracker for sealed::OffsetTracker {
-    type Span = Span;
-    fn next_span(&mut self, c: char) -> Span {
-        let start = self.offset;
-        self.offset += c.len_utf8();
-        Span(start, self.offset)
-    }
-}
 
-impl traits::sealed::Sealed for Span {
-    type Tracker = sealed::OffsetTracker;
-    fn at_start(&self, chars: usize) -> Self {
+impl Span {
+    /// Return a span of the given length at the start of this one.
+    pub fn at_start(&self, chars: usize) -> Self {
         Span(self.0, self.0 + chars)
     }
 
-    fn at_end(&self) -> Self {
+    /// Return empty span at the end of this one.
+    pub fn at_end(&self) -> Self {
         Span(self.1, self.1)
     }
 
-    fn before_start(&self, chars: usize) -> Self {
+    /// Return a span of the given length before the start of this one.
+    pub fn before_start(&self, chars: usize) -> Self {
         Span(self.0.saturating_sub(chars), self.0)
     }
 
-    fn length(&self) -> usize {
+    /// Length of the span
+    pub fn length(&self) -> usize {
         self.1.saturating_sub(self.0)
     }
 
-    fn stream(text: &str) -> traits::sealed::Stream<'_, Self, Self::Tracker>
+    /// Creates a stream of characters with spans from the given text.
+    pub fn stream(text: &str) -> Stream<'_, Self>
     where
         Self: chumsky::Span,
     {
+        let eoi = text.len();
         chumsky::Stream::from_iter(
-            Span(text.len(), text.len()),
-            traits::sealed::Map(text.chars(), sealed::OffsetTracker { offset: 0 }),
-        )
-    }
-}
-
-impl traits::Span for Span {}
-
-impl chumsky::Span for LineSpan {
-    type Context = ();
-    type Offset = LinePos;
-    fn new(_context: (), range: std::ops::Range<LinePos>) -> Self {
-        LineSpan(range.start, range.end)
-    }
-    fn context(&self) {}
-    fn start(&self) -> LinePos {
-        self.0
-    }
-    fn end(&self) -> LinePos {
-        self.1
-    }
-}
-
-#[cfg(feature = "line-numbers")]
-impl traits::sealed::SpanTracker for sealed::LineTracker {
-    type Span = LineSpan;
-    fn next_span(&mut self, c: char) -> LineSpan {
-        let offset = self.offset;
-        let line = self.line;
-        let column = self.column;
-        self.offset += c.len_utf8();
-        match c {
-            '\n' if self.caret_return => {}
-            '\r' | '\n' | '\x0C' | '\u{0085}' | '\u{2028}' | '\u{2029}' => {
-                self.line += 1;
-                self.column = 0;
-            }
-            '\t' => self.column += 8,
-            c => {
-                self.column += unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
-                // treat control chars as zero-length
-            }
-        }
-        self.caret_return = c == '\r';
-        LineSpan(
-            LinePos {
-                line,
-                column,
-                offset,
-            },
-            LinePos {
-                line: self.line,
-                column: self.column,
-                offset: self.offset,
-            },
-        )
-    }
-}
-
-#[cfg(feature = "line-numbers")]
-impl traits::sealed::Sealed for LineSpan {
-    type Tracker = sealed::LineTracker;
-    /// Note assuming ascii, single-width, non-newline chars here
-    fn at_start(&self, chars: usize) -> Self {
-        LineSpan(
-            self.0,
-            LinePos {
-                offset: self.0.offset + chars,
-                column: self.0.column + chars,
-                ..self.0
-            },
+            Span(eoi, eoi),
+            Map(text.chars(), OffsetTracker { offset: 0 }),
         )
     }
 
-    fn at_end(&self) -> Self {
-        LineSpan(self.1, self.1)
-    }
-
-    /// Note assuming ascii, single-width, non-newline chars here
-    fn before_start(&self, chars: usize) -> Self {
-        LineSpan(
-            LinePos {
-                offset: self.0.offset.saturating_sub(chars),
-                column: self.0.column.saturating_sub(chars),
-                ..self.0
-            },
-            self.0,
-        )
-    }
-
-    fn length(&self) -> usize {
-        self.1.offset.saturating_sub(self.0.offset)
-    }
-
-    fn stream(text: &str) -> traits::sealed::Stream<'_, Self, Self::Tracker>
-    where
-        Self: chumsky::Span,
-    {
-        let mut caret_return = false;
-        let mut line = 0;
-        let mut last_line = text;
-        let mut iter = text.chars();
-        while let Some(c) = iter.next() {
-            match c {
-                '\n' if caret_return => {}
-                '\r' | '\n' | '\x0C' | '\u{0085}' | '\u{2028}' | '\u{2029}' => {
-                    line += 1;
-                    last_line = iter.as_str();
-                }
-                _ => {}
-            }
-            caret_return = c == '\r';
-        }
-        let column = unicode_width::UnicodeWidthStr::width(last_line);
-        let eoi = LinePos {
-            line,
-            column,
-            offset: text.len(),
-        };
-        chumsky::Stream::from_iter(
-            LineSpan(eoi, eoi),
-            traits::sealed::Map(
-                text.chars(),
-                sealed::LineTracker {
-                    caret_return: false,
-                    offset: 0,
-                    line: 0,
-                    column: 0,
+    #[cfg(feature = "line-numbers")]
+    /// Converts the span's byte offsets to zero-based line/column pairs
+    pub fn to_line_column(&self, text: &str) -> ((usize, usize), (usize, usize)) {
+        let prefix = &text[..self.0];
+        let (start_line, start_column) = line_column_of_end(prefix);
+        let span_text = &text[self.0..self.1];
+        let (end_line, end_column) = line_column_of_end(span_text);
+        (
+            (start_line, start_column),
+            (
+                start_line + end_line,
+                if end_line == 0 {
+                    start_column + end_column
+                } else {
+                    end_column
                 },
             ),
         )
     }
 }
 
-#[cfg(feature = "line-numbers")]
-impl traits::Span for LineSpan {}
+fn line_column_of_end(text: &str) -> (usize, usize) {
+    let mut caret_return = false;
+    let mut line = 0;
+    let mut last_line = text;
+    let mut iter = text.chars();
+    while let Some(c) = iter.next() {
+        match c {
+            '\n' if caret_return => {}
+            '\r' | '\n' | '\x0C' | '\u{0085}' | '\u{2028}' | '\u{2029}' => {
+                line += 1;
+                last_line = iter.as_str();
+            }
+            _ => {}
+        }
+        caret_return = c == '\r';
+    }
+    let column = unicode_width::UnicodeWidthStr::width(last_line);
+    (line, column)
+}
 
-#[cfg(feature = "line-numbers")]
-impl traits::DecodeSpan<LineSpan> for Span {
-    fn decode_span(span: &LineSpan, _: &mut Context<LineSpan>) -> Self {
-        Span(span.0.offset, span.1.offset)
+/// Helper struct for computing spans
+#[derive(Debug)]
+struct OffsetTracker {
+    offset: usize,
+}
+
+impl OffsetTracker {
+    fn next_span(&mut self, c: char) -> Span {
+        let offset = self.offset;
+        self.offset += c.len_utf8();
+        Span(offset, self.offset)
     }
 }
 
-impl<T, S> Spanned<T, S> {
+/// A wrapper around an iterator that produces characters with spans.
+#[allow(missing_debug_implementations)]
+pub struct Map<I: Iterator<Item = char>>(I, OffsetTracker);
+
+/// Short-hand for chumsky's `Stream` type with our spans and chars.
+type Stream<'a, S> = chumsky::Stream<'a, char, S, Map<std::str::Chars<'a>>>;
+
+impl<I> Iterator for Map<I>
+where
+    I: Iterator<Item = char>,
+{
+    type Item = (char, Span);
+    fn next(&mut self) -> Option<(char, Span)> {
+        self.0.next().map(|c| (c, self.1.next_span(c)))
+    }
+}
+
+impl DecodeSpan for Span {
+    fn decode_span(span: &Span, _: &mut Context) -> Self {
+        *span
+    }
+}
+
+impl<T> Spanned<T> {
     /// Converts value but keeps the same span attached
-    pub fn map<R>(self, f: impl FnOnce(T) -> R) -> Spanned<R, S> {
+    pub fn map<R>(self, f: impl FnOnce(T) -> R) -> Spanned<R> {
         Spanned {
             span: self.span,
             value: f(self.value),
         }
     }
-    /// Converts span but keeps the same value attached
-    pub fn map_span<U>(self, f: impl FnOnce(S) -> U) -> Spanned<T, U> {
-        Spanned {
-            span: f(self.span),
-            value: self.value,
-        }
-    }
-    pub(crate) fn clone_as<U>(&self, ctx: &mut Context<S>) -> Spanned<T, U>
+    pub(crate) fn clone_as(&self, ctx: &mut Context) -> Spanned<T>
     where
-        U: traits::DecodeSpan<S>,
         T: Clone,
-        S: traits::ErrorSpan,
     {
         Spanned {
-            span: traits::DecodeSpan::decode_span(&self.span, ctx),
+            span: DecodeSpan::decode_span(&self.span, ctx),
             value: self.value.clone(),
         }
     }
 }
 
-impl<U: ?Sized, T: AsRef<U>, S> AsRef<U> for Spanned<T, S> {
+impl<U: ?Sized, T: AsRef<U>> AsRef<U> for Spanned<T> {
     fn as_ref(&self) -> &U {
         self.value.as_ref()
     }
 }
 
-impl<U: ?Sized, T: AsMut<U>, S> AsMut<U> for Spanned<T, S> {
+impl<U: ?Sized, T: AsMut<U>> AsMut<U> for Spanned<T> {
     fn as_mut(&mut self) -> &mut U {
         self.value.as_mut()
     }
 }
 
-impl<T, S> std::ops::Deref for Spanned<T, S> {
+impl<T> std::ops::Deref for Spanned<T> {
     type Target = T;
     fn deref(&self) -> &T {
         &self.value
     }
 }
 
-impl<T, S> std::ops::DerefMut for Spanned<T, S> {
+impl<T> std::ops::DerefMut for Spanned<T> {
     fn deref_mut(&mut self) -> &mut T {
         &mut self.value
     }
 }
 
-impl<T, S> std::borrow::Borrow<T> for Spanned<T, S> {
+impl<T> std::borrow::Borrow<T> for Spanned<T> {
     fn borrow(&self) -> &T {
         self.value.borrow()
     }
 }
 
-impl<T: ?Sized, S> std::borrow::Borrow<T> for Spanned<Box<T>, S> {
+impl<T: ?Sized> std::borrow::Borrow<T> for Spanned<Box<T>> {
     fn borrow(&self) -> &T {
         self.value.borrow()
     }
 }
 
-impl<T, S> Spanned<T, S> {
+impl<T> Spanned<T> {
     /// Returns the span of the value
-    pub fn span(&self) -> &S {
+    pub fn span(&self) -> &Span {
         &self.span
     }
 }
 
-impl<S, T: PartialEq<T>> PartialEq for Spanned<T, S> {
-    fn eq(&self, other: &Spanned<T, S>) -> bool {
+impl<T: PartialEq<T>> PartialEq for Spanned<T> {
+    fn eq(&self, other: &Spanned<T>) -> bool {
         self.value == other.value
     }
 }
 
-impl<S, T: PartialOrd<T>> PartialOrd for Spanned<T, S> {
-    fn partial_cmp(&self, other: &Spanned<T, S>) -> Option<std::cmp::Ordering> {
+impl<T: PartialOrd<T>> PartialOrd for Spanned<T> {
+    fn partial_cmp(&self, other: &Spanned<T>) -> Option<std::cmp::Ordering> {
         self.value.partial_cmp(&other.value)
     }
 }
 
-impl<S, T: Ord> Ord for Spanned<T, S> {
-    fn cmp(&self, other: &Spanned<T, S>) -> std::cmp::Ordering {
+impl<T: Ord> Ord for Spanned<T> {
+    fn cmp(&self, other: &Spanned<T>) -> std::cmp::Ordering {
         self.value.cmp(&other.value)
     }
 }
 
-impl<S, T: Eq> Eq for Spanned<T, S> {}
+impl<T: Eq> Eq for Spanned<T> {}
 
-impl<S, T: std::hash::Hash> std::hash::Hash for Spanned<T, S> {
+impl<T: std::hash::Hash> std::hash::Hash for Spanned<T> {
     fn hash<H>(&self, state: &mut H)
     where
         H: std::hash::Hasher,
@@ -388,17 +252,42 @@ impl<S, T: std::hash::Hash> std::hash::Hash for Spanned<T, S> {
     }
 }
 
-impl fmt::Display for Span {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.0.fmt(f)?;
-        "..".fmt(f)?;
-        self.1.fmt(f)?;
-        Ok(())
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_line_column() {
+        let text = "Hello\nWorld!\nThis is a test.\n";
+        let span = Span(6, 12); // "World!"
+        let ((start_line, start_col), (end_line, end_col)) = span.to_line_column(text);
+        assert_eq!((start_line, start_col), (1, 0));
+        assert_eq!((end_line, end_col), (1, 6));
+        let span2 = Span(0, 5); // "Hello"
+        let ((s_line, s_col), (e_line, e_col)) = span2.to_line_column(text);
+        assert_eq!((s_line, s_col), (0, 0));
+        assert_eq!((e_line, e_col), (0, 5));
+        let span3 = Span(17, 25); // " is a te"
+        let ((s_line3, s_col3), (e_line3, e_col3)) = span3.to_line_column(text);
+        assert_eq!((s_line3, s_col3), (2, 4));
+        assert_eq!((e_line3, e_col3), (2, 12));
     }
-}
 
-impl From<Range<usize>> for Span {
-    fn from(r: Range<usize>) -> Span {
-        Span(r.start, r.end)
+    #[test]
+    fn test_line_column_carriage_return() {
+        let text = "Line1\rLine2\r\nLine3\nLine4";
+        let span = Span(6, 11); // "Line2"
+        let ((start_line, start_col), (end_line, end_col)) = span.to_line_column(text);
+        assert_eq!((start_line, start_col), (1, 0));
+        assert_eq!((end_line, end_col), (1, 5));
+    }
+
+    #[test]
+    fn test_line_column_multi_byte() {
+        let text = "Hellö\n, Flöße";
+        let span = Span(9, 16); // "Flöße"
+        println!("Span: {}", &text[9..16]);
+        let ((start_line, start_col), (end_line, end_col)) = span.to_line_column(text);
+        assert_eq!((start_line, start_col), (1, 2));
+        assert_eq!((end_line, end_col), (1, 7));
     }
 }
