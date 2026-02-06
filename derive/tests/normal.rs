@@ -119,7 +119,10 @@ struct FilteredChildren {
 #[derive(knus_derive::Decode, Debug, PartialEq)]
 enum Variant {
     Arg1(Arg1),
+
+    #[knus(name = "prop1_renamed")]
     Prop1(Prop1),
+
     #[knus(skip)]
     #[allow(dead_code)]
     Var3(u32),
@@ -175,7 +178,7 @@ struct UnwrapChildren {
 
 #[derive(knus_derive::Decode, Debug, PartialEq)]
 struct Parse {
-    #[knus(child, unwrap(argument, str))]
+    #[knus(child(name = "listen-addr"), unwrap(argument, str))]
     listen: std::net::SocketAddr,
 }
 
@@ -774,26 +777,26 @@ fn parse_enum() {
         })
     );
     assert_eq!(
-        parse::<Variant>(r#"prop1 label="hello""#),
+        parse::<Variant>(r#"prop1_renamed label="hello""#),
         Variant::Prop1(Prop1 {
             label: "hello".into()
         })
     );
     assert_eq!(
         parse_err::<Variant>(r#"something"#),
-        "expected one of `arg1`, `prop1`"
+        "expected one of `arg1`, `prop1_renamed`"
     );
 }
 
 #[test]
 fn parse_str() {
     assert_eq!(
-        parse_doc::<Parse>(r#"listen "127.0.0.1:8080""#),
+        parse_doc::<Parse>(r#"listen-addr "127.0.0.1:8080""#),
         Parse {
             listen: "127.0.0.1:8080".parse().unwrap()
         }
     );
-    assert!(parse_doc_err::<Parse>(r#"listen "2/3""#).contains("invalid"));
+    assert!(parse_doc_err::<Parse>(r#"listen-addr "2/3""#).contains("invalid"));
 
     assert_eq!(
         parse::<ParseOpt>(r#"server listen="127.0.0.1:8080""#),

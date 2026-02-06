@@ -37,7 +37,7 @@ pub enum FieldMode {
     Arguments,
     Properties,
     Children { name: Option<String> },
-    Child,
+    Child { name: Option<String> },
     Flatten(Flatten),
     Span,
     NodeName,
@@ -70,6 +70,7 @@ pub enum Attr {
     Unwrap(FieldAttrs),
     Default(Option<syn::Expr>),
     SpanType(syn::Type),
+    Name(String),
 }
 
 #[derive(Debug, Clone)]
@@ -83,6 +84,7 @@ pub struct FieldAttrs {
 #[derive(Debug, Clone)]
 pub struct VariantAttrs {
     pub skip: bool,
+    pub name: Option<String>,
 }
 
 #[derive(Clone)]
@@ -267,8 +269,11 @@ fn is_bool(ty: &syn::Type) -> bool {
 }
 
 impl Variant {
-    fn new(ident: syn::Ident, _attrs: VariantAttrs, kind: VariantKind) -> syn::Result<Self> {
-        let name = heck::ToKebabCase::to_kebab_case(&ident.unraw().to_string()[..]);
+    fn new(ident: syn::Ident, attrs: VariantAttrs, kind: VariantKind) -> syn::Result<Self> {
+        let name = attrs
+            .name
+            .unwrap_or_else(|| heck::ToKebabCase::to_kebab_case(&ident.unraw().to_string()[..]));
+
         Ok(Variant { ident, name, kind })
     }
 }
@@ -477,7 +482,7 @@ impl StructBuilder {
                         .unwrap_or(DecodeMode::Normal),
                 });
             }
-            Some(FieldMode::Child) => {
+            Some(FieldMode::Child { name }) => {
                 attrs.no_decode("children");
                 if let Some(prev) = &self.var_children {
                     return Err(err_pair(
@@ -488,9 +493,9 @@ impl StructBuilder {
                     ));
                 }
                 let name = match &field.attr {
-                    AttrAccess::Named(n) => {
+                    AttrAccess::Named(n) => name.clone().unwrap_or_else(|| {
                         heck::ToKebabCase::to_kebab_case(&n.unraw().to_string()[..])
-                    }
+                    }),
                     AttrAccess::Indexed(_) => {
                         return Err(syn::Error::new(
                             field.span,
@@ -779,7 +784,10 @@ impl FieldAttrs {
 
 impl VariantAttrs {
     fn new() -> VariantAttrs {
-        VariantAttrs { skip: false }
+        VariantAttrs {
+            skip: false,
+            name: None,
+        }
     }
     fn update(&mut self, attrs: impl IntoIterator<Item = (Attr, Span)>) {
         use Attr::*;
@@ -787,6 +795,7 @@ impl VariantAttrs {
         for (attr, span) in attrs {
             match attr {
                 Skip => self.skip = true,
+                Name(name) => self.name = Some(name),
                 _ => emit_error!(span, "not supported on enum variants"),
             }
         }
@@ -825,44 +834,19 @@ impl Attr {
             Ok(Attr::FieldMode(FieldMode::Arguments))
         } else if lookahead.peek(kw::property) {
             let _kw: kw::property = input.parse()?;
-            let mut name = None;
-            if !input.is_empty() && !input.lookahead1().peek(syn::Token![,]) {
-                let parens;
-                syn::parenthesized!(parens in input);
-                let lookahead = parens.lookahead1();
-                if lookahead.peek(kw::name) {
-                    let _kw: kw::name = parens.parse()?;
-                    let _eq: syn::Token![=] = parens.parse()?;
-                    let name_lit: syn::LitStr = parens.parse()?;
-                    name = Some(name_lit.value());
-                } else {
-                    return Err(lookahead.error());
-                }
-            }
+            let name = parse_name_in_parens(input)?;
             Ok(Attr::FieldMode(FieldMode::Property { name }))
         } else if lookahead.peek(kw::properties) {
             let _kw: kw::properties = input.parse()?;
             Ok(Attr::FieldMode(FieldMode::Properties))
         } else if lookahead.peek(kw::children) {
             let _kw: kw::children = input.parse()?;
-            let mut name = None;
-            if !input.is_empty() && !input.lookahead1().peek(syn::Token![,]) {
-                let parens;
-                syn::parenthesized!(parens in input);
-                let lookahead = parens.lookahead1();
-                if lookahead.peek(kw::name) {
-                    let _kw: kw::name = parens.parse()?;
-                    let _eq: syn::Token![=] = parens.parse()?;
-                    let name_lit: syn::LitStr = parens.parse()?;
-                    name = Some(name_lit.value());
-                } else {
-                    return Err(lookahead.error());
-                }
-            }
+            let name = parse_name_in_parens(input)?;
             Ok(Attr::FieldMode(FieldMode::Children { name }))
         } else if lookahead.peek(kw::child) {
             let _kw: kw::child = input.parse()?;
-            Ok(Attr::FieldMode(FieldMode::Child))
+            let name = parse_name_in_parens(input)?;
+            Ok(Attr::FieldMode(FieldMode::Child { name }))
         } else if lookahead.peek(kw::unwrap) {
             let _kw: kw::unwrap = input.parse()?;
             let parens;
@@ -919,10 +903,35 @@ impl Attr {
             let _eq: syn::Token![=] = input.parse()?;
             let ty: syn::Type = input.parse()?;
             Ok(Attr::SpanType(ty))
+        } else if lookahead.peek(kw::name) {
+            let _kw: kw::name = input.parse()?;
+            let _eq: syn::Token![=] = input.parse()?;
+            let name_lit: syn::LitStr = input.parse()?;
+            Ok(Attr::Name(name_lit.value()))
         } else {
             Err(lookahead.error())
         }
     }
+}
+
+fn parse_name_in_parens(input: &syn::parse::ParseBuffer<'_>) -> Result<Option<String>, syn::Error> {
+    Ok(
+        if !input.is_empty() && !input.lookahead1().peek(syn::Token![,]) {
+            let parens;
+            syn::parenthesized!(parens in input);
+            let lookahead = parens.lookahead1();
+            if lookahead.peek(kw::name) {
+                let _kw: kw::name = parens.parse()?;
+                let _eq: syn::Token![=] = parens.parse()?;
+                let name_lit: syn::LitStr = parens.parse()?;
+                Some(name_lit.value())
+            } else {
+                return Err(lookahead.error());
+            }
+        } else {
+            None
+        },
+    )
 }
 
 impl Parse for FlattenItem {
