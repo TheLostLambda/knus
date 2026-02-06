@@ -43,7 +43,7 @@ macro_rules! impl_integer {
                 if let Some(typ) = type_name {
                     if typ.as_builtin() != Some(&BuiltinType::$marker) {
                         ctx.emit_error(DecodeError::TypeName {
-                            span: typ.span().clone(),
+                            span: *typ.span(),
                             found: Some(typ.value.clone()),
                             expected: ExpectedType::optional(BuiltinType::$marker),
                             rust_type: stringify!($typ),
@@ -97,7 +97,7 @@ macro_rules! impl_float {
                 if let Some(typ) = type_name {
                     if typ.as_builtin() != Some(&BuiltinType::$marker) {
                         ctx.emit_error(DecodeError::TypeName {
-                            span: typ.span().clone(),
+                            span: *typ.span(),
                             found: Some(typ.value.clone()),
                             expected: ExpectedType::optional(BuiltinType::$marker),
                             rust_type: stringify!($typ),

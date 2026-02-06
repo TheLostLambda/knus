@@ -50,7 +50,7 @@ impl chumsky::Span for Span {
 }
 
 impl Span {
-    /// Note assuming ascii, single-width, non-newline chars here
+    /// Return a span of the given length at the start of this one.
     pub fn at_start(&self, chars: usize) -> Self {
         Span(self.0, self.0 + chars)
     }
@@ -60,7 +60,7 @@ impl Span {
         Span(self.1, self.1)
     }
 
-    /// Note assuming ascii, single-width, non-newline chars here
+    /// Return a span of the given length before the start of this one.
     pub fn before_start(&self, chars: usize) -> Self {
         Span(self.0.saturating_sub(chars), self.0)
     }
@@ -125,7 +125,7 @@ fn line_column_of_end(text: &str) -> (usize, usize) {
 
 /// Helper struct for computing spans
 #[derive(Debug)]
-pub struct OffsetTracker {
+struct OffsetTracker {
     offset: usize,
 }
 
@@ -139,10 +139,10 @@ impl OffsetTracker {
 
 /// A wrapper around an iterator that produces characters with spans.
 #[allow(missing_debug_implementations)]
-pub struct Map<I: Iterator<Item = char>>(pub(crate) I, pub(crate) OffsetTracker);
+pub struct Map<I: Iterator<Item = char>>(I, OffsetTracker);
 
 /// Short-hand for chumsky's `Stream` type with our spans and chars.
-pub type Stream<'a, S> = chumsky::Stream<'a, char, S, Map<std::str::Chars<'a>>>;
+type Stream<'a, S> = chumsky::Stream<'a, char, S, Map<std::str::Chars<'a>>>;
 
 impl<I> Iterator for Map<I>
 where

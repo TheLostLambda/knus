@@ -735,7 +735,7 @@ Enum variant names are matches against node names converted into `kebab-case`.
 
 ## Span Type
 
-But if you want to use `span` argument, you need to specify a field
+If you want to use the `span` argument, you need to specify a field
 with the type `knus::span::Span` or provide a custom type that
 implements `DecodeSpan`.
 
