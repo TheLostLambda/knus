@@ -197,6 +197,24 @@ struct OptBytes {
     data: Option<Vec<u8>>,
 }
 
+fn decode_duration_seconds(s: &str) -> Result<std::time::Duration, std::num::ParseIntError>
+{
+    s.parse::<u64>()
+        .map(std::time::Duration::from_secs)
+}
+
+#[derive(knus_derive::Decode, Debug, PartialEq)]
+struct DecodeWith {
+    #[knus(child, unwrap(argument, decode_with = decode_duration_seconds))]
+    duration: std::time::Duration,
+}
+
+#[derive(knus_derive::Decode, Debug, PartialEq)]
+struct DecodeWithOpt {
+    #[knus(property, decode_with = decode_duration_seconds)]
+    duration: Option<std::time::Duration>,
+}
+
 fn parse<T: Decode<Span>>(text: &str) -> T {
     let mut nodes: Vec<T> = knus::parse("<test>", text).unwrap();
     assert_eq!(nodes.len(), 1);
@@ -842,6 +860,35 @@ fn parse_bytes() {
     assert_eq!(
         parse::<OptBytes>(r#"node data=null"#),
         OptBytes { data: None }
+    );
+}
+
+#[test]
+fn parse_decode_with() {
+    assert_eq!(
+        parse_doc::<DecodeWith>(r#"duration "42""#),
+        DecodeWith {
+            duration: std::time::Duration::from_secs(42)
+        }
+    );
+    assert!(parse_doc_err::<DecodeWith>(r#"duration "no""#).contains("invalid"));
+
+    assert_eq!(
+        parse::<DecodeWithOpt>(r#"node duration="42""#),
+        DecodeWithOpt {
+            duration: Some(std::time::Duration::from_secs(42))
+        }
+    );
+    assert!(parse_err::<DecodeWithOpt>(r#"node duration="no""#).contains("invalid"));
+
+    assert_eq!(
+        parse::<DecodeWithOpt>(r#"node duration=null"#),
+        DecodeWithOpt { duration: None }
+    );
+
+    assert_eq!(
+        parse::<DecodeWithOpt>(r#"node"#),
+        DecodeWithOpt { duration: None }
     );
 }
 
