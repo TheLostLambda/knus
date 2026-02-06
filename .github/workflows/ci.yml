@@ -27,13 +27,6 @@ jobs:
         with:
           toolchain: ${{ matrix.toolchain }}
 
-      # NOTE: `rustdoc` doesn't currently respect the `linker` setting — keep
-      # an eye on this issue: https://github.com/rust-lang/rust/issues/125657.
-      # In the meantime, we can't use `rust-lld` and will need to manually
-      # install `lld` on macOS (#14)
-      - if: runner.os == 'macOS'
-        run: brew install lld
-
       - run: just test
 
   check_wasm_build:
