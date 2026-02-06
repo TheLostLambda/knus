@@ -6,7 +6,6 @@ use knus::traits::Decode;
 struct Child;
 
 #[derive(knus_derive::Decode, Debug, PartialEq)]
-#[knus(span_type=Span)]
 struct NodeSpan {
     #[knus(span)]
     span: Span,
@@ -30,7 +29,7 @@ struct NameAndType {
     type_name: Option<TypeName>,
 }
 
-fn parse<T: Decode<Span>>(text: &str) -> T {
+fn parse<T: Decode>(text: &str) -> T {
     let mut nodes: Vec<T> = knus::parse("<test>", text).unwrap();
     assert_eq!(nodes.len(), 1);
     nodes.remove(0)

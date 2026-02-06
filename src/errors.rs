@@ -6,13 +6,16 @@ use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::fmt::{self, Write};
 
+use chumsky::DefaultExpected;
+use chumsky::label::LabelError;
+use chumsky::span::SimpleSpan;
+use chumsky::util::Maybe;
 use miette::{Diagnostic, NamedSource};
 use thiserror::Error;
 
 use crate::ast::{Literal, SpannedNode, TypeName};
 use crate::decode::Kind;
-use crate::span::Spanned;
-use crate::traits::{ErrorSpan, Span};
+use crate::span::{Span, Spanned};
 
 /// Main error that is returned from KDL parsers
 ///
@@ -35,7 +38,7 @@ pub struct Error {
 /// These are elements of the
 #[derive(Debug, Diagnostic, Error)]
 #[non_exhaustive]
-pub enum DecodeError<S: ErrorSpan> {
+pub enum DecodeError {
     /// Unexpected type name encountered
     ///
     /// Type names are identifiers and strings in parenthesis before node names
@@ -46,7 +49,7 @@ pub enum DecodeError<S: ErrorSpan> {
     TypeName {
         /// Position of the type name
         #[label = "unexpected type name"]
-        span: S,
+        span: Span,
         /// Type name contained in the source code
         found: Option<TypeName>,
         /// Expected type name or type names
@@ -63,7 +66,7 @@ pub enum DecodeError<S: ErrorSpan> {
     ScalarKind {
         /// Position of the unexpected scalar
         #[label("unexpected {}", found)]
-        span: S,
+        span: Span,
         /// Scalar kind (or multiple) expected at this position
         expected: ExpectedKind,
         /// Kind of scalar that is found
@@ -78,7 +81,7 @@ pub enum DecodeError<S: ErrorSpan> {
     Missing {
         /// Position of the node name of which has missing element
         #[label("node starts here")]
-        span: S,
+        span: Span,
         /// Description of what's missing
         message: String,
     },
@@ -103,7 +106,7 @@ pub enum DecodeError<S: ErrorSpan> {
     Unexpected {
         /// Position of the unexpected element
         #[label("unexpected {}", kind)]
-        span: S,
+        span: Span,
         /// Kind of element that was found
         kind: &'static str,
         /// Description of the error
@@ -121,7 +124,7 @@ pub enum DecodeError<S: ErrorSpan> {
     Conversion {
         /// Position of the scalar that could not be converted
         #[label("invalid value")]
-        span: S,
+        span: Span,
         /// Original error
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
@@ -134,7 +137,7 @@ pub enum DecodeError<S: ErrorSpan> {
     Unsupported {
         /// Position of the value that is unsupported
         #[label = "unsupported value"]
-        span: S,
+        span: Span,
         /// Description of why the value is not supported
         message: Cow<'static, str>,
     },
@@ -154,19 +157,27 @@ pub(crate) enum TokenFormat {
     Kind(&'static str),
     OpenRaw(usize),
     CloseRaw(usize),
+    /// Opening delimiter for multi-line quoted string: """
+    OpenMultiline,
+    /// Closing delimiter for multi-line quoted string: """
+    CloseMultiline,
+    /// Opening delimiter for multi-line raw string: #""" (with n hashes)
+    OpenMultilineRaw(usize),
+    /// Closing delimiter for multi-line raw string: """# (with n hashes)
+    CloseMultilineRaw(usize),
     Eoi,
 }
 
 struct FormatUnexpected<'x>(&'x TokenFormat, &'x BTreeSet<TokenFormat>);
 
 #[derive(Debug, Diagnostic, Error)]
-pub(crate) enum ParseError<S: ErrorSpan> {
+pub(crate) enum ParseError {
     #[error("{}", FormatUnexpected(found, expected))]
     #[diagnostic()]
     Unexpected {
         label: Option<&'static str>,
         #[label("{}", label.unwrap_or("unexpected token"))]
-        span: S,
+        span: Span,
         found: TokenFormat,
         expected: BTreeSet<TokenFormat>,
     },
@@ -175,10 +186,10 @@ pub(crate) enum ParseError<S: ErrorSpan> {
     Unclosed {
         label: &'static str,
         #[label = "opened here"]
-        opened_at: S,
+        opened_at: Span,
         opened: TokenFormat,
         #[label("expected {}", expected)]
-        expected_at: S,
+        expected_at: Span,
         expected: TokenFormat,
         found: TokenFormat,
     },
@@ -187,7 +198,7 @@ pub(crate) enum ParseError<S: ErrorSpan> {
     Message {
         label: Option<&'static str>,
         #[label("{}", label.unwrap_or("unexpected token"))]
-        span: S,
+        span: Span,
         message: String,
     },
     #[error("{}", message)]
@@ -195,7 +206,7 @@ pub(crate) enum ParseError<S: ErrorSpan> {
     MessageWithHelp {
         label: Option<&'static str>,
         #[label("{}", label.unwrap_or("unexpected token"))]
-        span: S,
+        span: Span,
         message: String,
         help: &'static str,
     },
@@ -223,6 +234,17 @@ impl From<&'static str> for TokenFormat {
     }
 }
 
+impl TryFrom<DefaultExpected<'_, char>> for TokenFormat {
+    type Error = ();
+    fn try_from(e: DefaultExpected<'_, char>) -> Result<TokenFormat, ()> {
+        match e {
+            DefaultExpected::Token(c) => Ok(TokenFormat::Char(*c)),
+            DefaultExpected::EndOfInput => Ok(TokenFormat::Eoi),
+            _ => Err(()),
+        }
+    }
+}
+
 impl fmt::Display for TokenFormat {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use TokenFormat::*;
@@ -239,7 +261,7 @@ impl fmt::Display for TokenFormat {
             Eoi => write!(f, "end of input"),
             OpenRaw(0) => f.write_str("`r\"`"),
             OpenRaw(n) => {
-                f.write_str("`r")?;
+                f.write_str("`")?;
                 for _ in 0..*n {
                     f.write_char('#')?;
                 }
@@ -248,6 +270,22 @@ impl fmt::Display for TokenFormat {
             CloseRaw(0) => f.write_str("`\"`"),
             CloseRaw(n) => {
                 f.write_str("`\"")?;
+                for _ in 0..*n {
+                    f.write_char('#')?;
+                }
+                f.write_char('`')
+            }
+            OpenMultiline => f.write_str("`\"\"\"`"),
+            CloseMultiline => f.write_str("`\"\"\"`"),
+            OpenMultilineRaw(n) => {
+                f.write_str("`")?;
+                for _ in 0..*n {
+                    f.write_char('#')?;
+                }
+                f.write_str("\"\"\"`")
+            }
+            CloseMultilineRaw(n) => {
+                f.write_str("`\"\"\"")?;
                 for _ in 0..*n {
                     f.write_char('#')?;
                 }
@@ -275,7 +313,7 @@ impl fmt::Display for FormatUnexpected<'_> {
     }
 }
 
-impl<S: ErrorSpan> ParseError<S> {
+impl ParseError {
     pub(crate) fn with_expected_token(mut self, token: &'static str) -> Self {
         use ParseError::*;
         if let Unexpected { expected, .. } = &mut self {
@@ -298,10 +336,7 @@ impl<S: ErrorSpan> ParseError<S> {
         self
     }
     #[allow(dead_code)]
-    pub(crate) fn map_span<T>(self, f: impl Fn(S) -> T) -> ParseError<T>
-    where
-        T: ErrorSpan,
-    {
+    pub(crate) fn map_span(self, f: impl Fn(Span) -> Span) -> ParseError {
         use ParseError::*;
         match self {
             Unexpected {
@@ -354,30 +389,63 @@ impl<S: ErrorSpan> ParseError<S> {
     }
 }
 
-impl<S: Span> chumsky::Error<char> for ParseError<S> {
-    type Span = S;
-    type Label = &'static str;
-    fn expected_input_found<Iter>(span: Self::Span, expected: Iter, found: Option<char>) -> Self
-    where
-        Iter: IntoIterator<Item = Option<char>>,
-    {
+impl<'src> LabelError<'src, &'src str, DefaultExpected<'src, char>> for ParseError {
+    fn expected_found<E: IntoIterator<Item = DefaultExpected<'src, char>>>(
+        expected: E,
+        found: Option<Maybe<char, &'src char>>,
+        span: SimpleSpan,
+    ) -> Self {
         ParseError::Unexpected {
             label: None,
-            span,
-            found: found.into(),
-            expected: expected.into_iter().map(Into::into).collect(),
+            span: span.into(),
+            found: found.map(|c| *c).into(),
+            expected: expected
+                .into_iter()
+                .filter_map(|e| e.try_into().ok())
+                .collect(),
         }
     }
-    fn with_label(mut self, new_label: Self::Label) -> Self {
+    fn label_with(&mut self, new_label: DefaultExpected<'src, char>) {
         use ParseError::*;
+        let new_label = match new_label {
+            DefaultExpected::EndOfInput => "end of input",
+            DefaultExpected::Token(_) => "token",
+            DefaultExpected::Any => "any",
+            DefaultExpected::SomethingElse => "something else",
+            _ => "other",
+        };
         match self {
-            Unexpected { ref mut label, .. } => *label = Some(new_label),
-            Unclosed { ref mut label, .. } => *label = new_label,
-            Message { ref mut label, .. } => *label = Some(new_label),
-            MessageWithHelp { ref mut label, .. } => *label = Some(new_label),
+            Unexpected { label, .. } => *label = Some(new_label),
+            Unclosed { label, .. } => *label = new_label,
+            Message { label, .. } => *label = Some(new_label),
+            MessageWithHelp { label, .. } => *label = Some(new_label),
         }
-        self
     }
+    // fn merge_expected_found<E: IntoIterator<Item = L>>(
+    //     self,
+    //     expected: E,
+    //     found: Option<MaybeRef<'src, I::Token>>,
+    //     span: I::Span,
+    // ) -> Self
+    // where
+    //     Self: Error<'src, I>,
+    // {
+    //     self.merge(LabelError::expected_found(expected, found, span))
+    // }
+
+    // /// Fast path for `a = LabelError::expected_found(...)` that may incur less overhead by, for example, reusing allocations.
+    // #[inline(always)]
+    // fn replace_expected_found<E: IntoIterator<Item = L>>(
+    //     self,
+    //     expected: E,
+    //     found: Option<MaybeRef<'src, I::Token>>,
+    //     span: I::Span,
+    // ) -> Self {
+    //     LabelError::expected_found(expected, found, span)
+    // }
+}
+
+impl<'src> chumsky::error::Error<'src, &'src str> for ParseError {
     fn merge(mut self, other: Self) -> Self {
         use ParseError::*;
         match (&mut self, other) {
@@ -387,80 +455,64 @@ impl<S: Span> chumsky::Error<char> for ParseError<S> {
                 dest.extend(expected);
                 self
             }
-            (_, other) => todo!("{} -> {}", self, other),
-        }
-    }
-    fn unclosed_delimiter(
-        unclosed_span: Self::Span,
-        unclosed: char,
-        span: Self::Span,
-        expected: char,
-        found: Option<char>,
-    ) -> Self {
-        ParseError::Unclosed {
-            label: "delimited",
-            opened_at: unclosed_span,
-            opened: unclosed.into(),
-            expected_at: span,
-            expected: expected.into(),
-            found: found.into(),
+            (MessageWithHelp { .. }, _) => self,
+            (_, other @ MessageWithHelp { .. }) => other,
+            (Message { .. }, _) => self,
+            (_, other @ Message { .. }) => other,
         }
     }
 }
 
-impl<S: ErrorSpan> DecodeError<S> {
+impl DecodeError {
     /// Construct [`DecodeError::Conversion`] error
-    pub fn conversion<T, E>(span: &Spanned<T, S>, err: E) -> Self
+    pub fn conversion<T, E>(span: &Spanned<T>, err: E) -> Self
     where
         E: Into<Box<dyn std::error::Error + Send + Sync + 'static>>,
     {
         DecodeError::Conversion {
-            span: span.span().clone(),
+            span: *span.span(),
             source: err.into(),
         }
     }
     /// Construct [`DecodeError::ScalarKind`] error
-    pub fn scalar_kind(expected: Kind, found: &Spanned<Literal, S>) -> Self {
+    pub fn scalar_kind(expected: Kind, found: &Spanned<Literal>) -> Self {
         DecodeError::ScalarKind {
-            span: found.span().clone(),
+            span: *found.span(),
             expected: expected.into(),
             found: (&found.value).into(),
         }
     }
     /// Construct [`DecodeError::Missing`] error
-    pub fn missing(node: &SpannedNode<S>, message: impl Into<String>) -> Self {
+    pub fn missing(node: &SpannedNode, message: impl Into<String>) -> Self {
         DecodeError::Missing {
-            span: node.node_name.span().clone(),
+            span: *node.node_name.span(),
             message: message.into(),
         }
     }
     /// Construct [`DecodeError::Unexpected`] error
     pub fn unexpected<T>(
-        elem: &Spanned<T, S>,
+        elem: &Spanned<T>,
         kind: &'static str,
         message: impl Into<String>,
     ) -> Self {
         DecodeError::Unexpected {
-            span: elem.span().clone(),
+            span: *elem.span(),
             kind,
             message: message.into(),
         }
     }
     /// Construct [`DecodeError::Unsupported`] error
-    pub fn unsupported<T, M>(span: &Spanned<T, S>, message: M) -> Self
+    pub fn unsupported<T, M>(span: &Spanned<T>, message: M) -> Self
     where
         M: Into<Cow<'static, str>>,
     {
         DecodeError::Unsupported {
-            span: span.span().clone(),
+            span: *span.span(),
             message: message.into(),
         }
     }
     #[allow(dead_code)]
-    pub(crate) fn map_span<T>(self, mut f: impl FnMut(S) -> T) -> DecodeError<T>
-    where
-        T: ErrorSpan,
-    {
+    pub(crate) fn map_span(self, mut f: impl FnMut(Span) -> Span) -> DecodeError {
         use DecodeError::*;
         match self {
             TypeName {
