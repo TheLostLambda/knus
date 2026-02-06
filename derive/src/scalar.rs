@@ -124,7 +124,7 @@ pub fn emit_enum(e: &Enum) -> syn::Result<TokenStream> {
             {
                 if let Some(typ) = type_name {
                     ctx.emit_error(::knus::errors::DecodeError::TypeName {
-                        span: typ.span().clone(),
+                        span: *typ.span(),
                         found: Some((**typ).clone()),
                         expected: ::knus::errors::ExpectedType::no_type(),
                         rust_type: stringify!(#e_name),

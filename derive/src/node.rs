@@ -220,7 +220,7 @@ fn decode_value(
             Ok(quote![{
                 if let Some(typ) = &#val.type_name {
                     #ctx.emit_error(::knus::errors::DecodeError::TypeName {
-                        span: typ.span().clone(),
+                        span: *typ.span(),
                         found: Some((**typ).clone()),
                         expected: ::knus::errors::ExpectedType::no_type(),
                         rust_type: "str", // TODO(tailhook) show field type
@@ -251,7 +251,7 @@ fn decode_value(
             Ok(quote![{
                 if let Some(typ) = &#val.type_name {
                     #ctx.emit_error(::knus::errors::DecodeError::TypeName {
-                        span: typ.span().clone(),
+                        span: *typ.span(),
                         found: Some((**typ).clone()),
                         expected: ::knus::errors::ExpectedType::no_type(),
                         rust_type: "str", // TODO(tailhook) show field type
@@ -841,7 +841,7 @@ fn decode_children(
                         postprocess.push(quote! {
                             let #fld = #fld.ok_or_else(|| {
                                 ::knus::errors::DecodeError::Missing {
-                                    span: #span.clone(),
+                                    span: *#span,
                                     message: #req_msg.into(),
                                 }
                             })?;
