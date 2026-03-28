@@ -55,9 +55,29 @@ fn nodes<'src>() -> impl Parser<'src, Input<'src>, Vec<SpannedNode>, Error> + Cl
         //     (node-space* node-children)?
         //     (node-space* slashdash node-children)*
         //     node-space*
+
+        // The grammar uses `string` for the node name, but we also try to
+        // match numbers so we can report "found number, expected identifier".
+        let node_name = choice((
+            number().map(Err),
+            identifier_string().map(Ok),
+            string().map(Ok),
+        ))
+        .validate(|res, extras, emit| {
+            res.unwrap_or_else(|_| {
+                emit.emit(ParseError::Unexpected {
+                    label: Some("unexpected number"),
+                    span: extras.span().into(),
+                    found: TokenFormat::Kind("number"),
+                    expected: expected_kind("identifier"),
+                });
+                "".into()
+            })
+        });
+
         let base_node = spanned(r#type().then_ignore(node_space().repeated()))
             .or_not()
-            .then(spanned(identifier()))
+            .then(spanned(node_name))
             .then(
                 node_space()
                     .repeated()
@@ -160,8 +180,17 @@ fn node_prop_or_arg_inner<'src>() -> impl Parser<'src, Input<'src>, PropOrArg, E
         .then(unicode_space().repeated())
         .ignore_then(value());
 
+    // string | number | keyword (+ keyword-number), used to parse a
+    // potential prop name or argument value
+    let value_body = choice((
+        keyword(),
+        keyword_number(),
+        number(),
+        string().map(Literal::String),
+    ));
+
     choice((
-        spanned(literal())
+        spanned(value_body)
             .then(equals_value.clone().or_not())
             .validate(|(name, value), _, emit| {
                 let span = name.span;
@@ -238,7 +267,8 @@ fn node_prop_or_arg_inner<'src>() -> impl Parser<'src, Input<'src>, PropOrArg, E
                     })
                 }
             }),
-        type_name_value().map(Arg),
+        // Typed value like (string)"hello" — always an argument
+        value().map(Arg),
     ))
 }
 
@@ -249,44 +279,32 @@ fn node_terminator<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone 
 
 // value := type? node-space* (string | number | keyword)
 fn value<'src>() -> impl Parser<'src, Input<'src>, Value, Error> + Clone {
-    type_name_value().or(spanned(literal()).map(|literal| Value {
-        type_name: None,
-        literal,
-    }))
-}
+    // string | number | keyword (+ keyword-number)
+    let value_body = choice((
+        keyword(),
+        keyword_number(),
+        number(),
+        string().map(Literal::String),
+    ));
 
-// Helper: parses a typed value (type followed by literal).
-fn type_name_value<'src>() -> impl Parser<'src, Input<'src>, Value, Error> + Clone {
     spanned(r#type().then_ignore(node_space().repeated()))
-        .then(spanned(literal()))
+        .or_not()
+        .then(spanned(value_body))
         .map(|(type_name, literal)| Value {
-            type_name: Some(type_name),
+            type_name,
             literal,
         })
 }
 
 // type := '(' node-space* string node-space* ')'
 fn r#type<'src>() -> impl Parser<'src, Input<'src>, TypeName, Error> + Clone {
-    identifier()
-        .delimited_by(
-            just('(').then(node_space().repeated()),
-            node_space().repeated().then(just(')')),
-        )
-        .map(TypeName::from_string)
-}
-
-// Helper: parses a string used as node name or type name.
-// Not a direct grammar production — the grammar uses `string` in base-node and type,
-// but this also handles numbers-as-identifiers with error reporting.
-fn identifier<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
+    // The grammar uses `string` here, but we also try to match numbers
+    // so we can report "found number, expected identifier" errors.
     choice((
-        // match -123 so `-` will not be treated as an ident by backtracking
         number().map(Err),
         identifier_string().map(Ok),
         string().map(Ok),
     ))
-    // when backtracking is not already possible,
-    // throw error for numbers (mapped to `Result::Err`)
     .validate(|res, extras, emit| {
         res.unwrap_or_else(|_| {
             emit.emit(ParseError::Unexpected {
@@ -298,26 +316,23 @@ fn identifier<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone
             "".into()
         })
     })
-}
-
-// Helper: parses any literal value (keyword | keyword-number | number | string).
-// Not a direct grammar production — the grammar uses `value` which combines type + literal.
-fn literal<'src>() -> impl Parser<'src, Input<'src>, Literal, Error> + Clone {
-    // Check for `ident` last, because `ident` first checks for numbers,
-    // and it can confuse keywords with raw strings.
-    choice((
-        keyword(),
-        keyword_number(),
-        number(),
-        identifier().map(Literal::String),
-    ))
+    .delimited_by(
+        just('(').then(node_space().repeated()),
+        node_space().repeated().then(just(')')),
+    )
+    .map(TypeName::from_string)
 }
 
 // string := identifier-string | quoted-string | raw-string
 fn string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
     // Beware the order: multi-line variants must be tried before single-line variants
     // to ensure #""" is parsed as multi-line raw string, not single-line with content "".
-    choice((multi_line_raw_string(), raw_string(), quoted_string()))
+    choice((
+        identifier_string(),
+        multi_line_raw_string(),
+        raw_string(),
+        quoted_string(),
+    ))
 }
 
 // quoted-string :=
