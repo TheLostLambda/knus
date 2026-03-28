@@ -126,6 +126,14 @@ enum Variant {
 }
 
 #[derive(knus_derive::Decode, Debug, PartialEq)]
+struct FilteredAndUnfilteredChildren {
+    #[knus(children(name = "right"))]
+    right: Vec<OptArg>,
+    #[knus(children)]
+    variants: Vec<Variant>,
+}
+
+#[derive(knus_derive::Decode, Debug, PartialEq)]
 struct Child {
     #[knus(child)]
     main: Prop1,
@@ -627,6 +635,26 @@ fn parse_filtered_children() {
 }
 
 #[test]
+fn parse_filtered_and_unfiltered_children() {
+    assert_eq!(
+        parse_doc::<FilteredAndUnfilteredChildren>(r#"arg1 "v1"; right "v2"; prop1 label="v3""#),
+        FilteredAndUnfilteredChildren {
+            right: vec![OptArg {
+                name: Some("v2".into())
+            }],
+            variants: vec![
+                Variant::Arg1(Arg1 { name: "v1".into() }),
+                Variant::Prop1(Prop1 { label: "v3".into() }),
+            ],
+        }
+    );
+    assert_eq!(
+        parse_doc_err::<FilteredAndUnfilteredChildren>(r#"some"#),
+        "expected one of `arg1`, `prop1`"
+    );
+}
+
+#[test]
 fn parse_child() {
     assert_eq!(
         parse::<Child>(r#"parent { main label="val1"; }"#),
@@ -863,13 +891,15 @@ enum RecordType {
 struct ResourceRecord {
     #[knus(argument)]
     name: String,
-    #[knus(child(from_enum))]
+    #[knus(child(ignore_name))]
     r#type: RecordType,
 }
 
 #[derive(knus_derive::Decode, Debug, PartialEq)]
-struct ResourceRecordOnlyType {
-    #[knus(child(from_enum))]
+struct ResourceRecordOnlyChildren {
+    #[knus(children(name = "rr"))]
+    resource_records: Vec<ResourceRecord>,
+    #[knus(child(ignore_name))]
     r#type: RecordType,
 }
 
@@ -921,13 +951,20 @@ fn parse_child_enum() {
 #[test]
 fn parse_child_enum_no_args() {
     assert_eq!(
-        parse_doc::<ResourceRecordOnlyType>(r#"a "192.0.2.1""#),
-        ResourceRecordOnlyType {
+        parse_doc::<ResourceRecordOnlyChildren>(
+            r#"rr "example.com" { a "192.0.2.1"; }
+            a "192.0.2.1""#
+        ),
+        ResourceRecordOnlyChildren {
+            resource_records: vec![ResourceRecord {
+                name: "example.com".into(),
+                r#type: RecordType::A("192.0.2.1".into()),
+            }],
             r#type: RecordType::A("192.0.2.1".into()),
         }
     );
     assert_eq!(
-        parse_doc_err::<ResourceRecordOnlyType>("a \"192.0.2.1\"\na \"192.0.2.1\""),
+        parse_doc_err::<ResourceRecordOnlyChildren>("a \"192.0.2.1\"\na \"192.0.2.1\""),
         "unexpected node; single child expected"
     );
 }

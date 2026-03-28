@@ -832,8 +832,8 @@ impl Attr {
                 let parens;
                 syn::parenthesized!(parens in input);
                 let lookahead = parens.lookahead1();
-                if lookahead.peek(kw::from_enum) {
-                    let _kw: kw::from_enum = parens.parse()?;
+                if lookahead.peek(kw::ignore_name) {
+                    let _kw: kw::ignore_name = parens.parse()?;
                     from_enum = true;
                 } else {
                     return Err(lookahead.error());
