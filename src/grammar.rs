@@ -10,512 +10,107 @@ use crate::span::{Span, Spanned};
 type Error = extra::Err<ParseError>;
 type Input<'src> = &'src str;
 
-fn begin_comment<'src>(which: char) -> impl Parser<'src, Input<'src>, (), Error> + Clone {
-    just('/')
-        .map_err(|e: ParseError| e.with_no_expected())
-        .ignore_then(just(which).ignored())
-}
-
-fn newline<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
-    just('\r')
+pub(crate) fn document<'src>() -> impl Parser<'src, Input<'src>, Document, Error> {
+    just('\u{FEFF}')
         .or_not()
-        .ignore_then(just('\n'))
-        .or(just('\r')) // Carriage return
-        .or(just('\x0C')) // Form feed
-        .or(just('\x0B')) // Vertical tab
-        .or(just('\u{0085}')) // Next line
-        .or(just('\u{2028}')) // Line separator
-        .or(just('\u{2029}')) // Paragraph separator
-        .ignored()
-        .map_err(|e: ParseError| e.with_expected_kind("newline"))
+        .ignore_then(nodes())
+        .map(|nodes| Document { nodes })
 }
 
-fn ws_char<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
-    any::<_, Error>()
-        .filter(|c| {
-            matches!(
-                c,
-                '\t' | ' ' | '\u{00a0}' | '\u{1680}' | '\u{2000}'
-                    ..='\u{200A}' | '\u{202F}' | '\u{205F}' | '\u{3000}'
-            )
-        })
-        .ignored()
-}
-
-fn id_char<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
-    any::<_, Error>()
-        .filter(|c| {
-            !matches!(c,
-                '\u{0000}'..='\u{0021}' |
-                '\\'|'/'|'('|')'|'{'|'}'|';'|'['|']'|'='|'"'|'#' |
-                // whitespace, excluding 0x20
-                '\u{00a0}' | '\u{1680}' |
-                '\u{2000}'..='\u{200A}' |
-                '\u{202F}' | '\u{205F}' | '\u{3000}' | '\u{FEFF}' |
-                // newline (excluding <= 0x20)
-                '\u{0085}' | '\u{2028}' | '\u{2029}'
-            )
-        })
-        .map_err(|e| e.with_expected_kind("letter"))
-}
-
-fn id_sans_dig<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
-    any::<_, Error>()
-        .filter(|c| {
-            !matches!(c,
-                '0'..='9' |
-                '\u{0000}'..='\u{0020}' |
-                '\\'|'/'|'('|')'|'{'|'}'|';'|'['|']'|'='|'"'|'#' |
-                // whitespace, excluding 0x20
-                '\u{00a0}' | '\u{1680}' |
-                '\u{2000}'..='\u{200A}' |
-                '\u{202F}' | '\u{205F}' | '\u{3000}' | '\u{FEFF}' |
-                // newline (excluding <= 0x20)
-                '\u{0085}' | '\u{2028}' | '\u{2029}'
-            )
-        })
-        .map_err(|e| e.with_expected_kind("letter"))
-}
-
-fn id_sans_dig_point<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
-    any::<_, Error>()
-        .filter(|c| {
-            !matches!(c,
-                '0'..='9' | '.' |
-                '\u{0000}'..='\u{0020}' |
-                '\\'|'/'|'('|')'|'{'|'}'|';'|'['|']'|'='|'"'|'#' |
-                // whitespace, excluding 0x20
-                '\u{00a0}' | '\u{1680}' |
-                '\u{2000}'..='\u{200A}' |
-                '\u{202F}' | '\u{205F}' | '\u{3000}' | '\u{FEFF}' |
-                // newline (excluding <= 0x20)
-                '\u{0085}' | '\u{2028}' | '\u{2029}'
-            )
-        })
-        .map_err(|e| e.with_expected_kind("letter"))
-}
-
-fn id_sans_sign_dig_point<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
-    any::<_, Error>()
-        .filter(|c| {
-            !matches!(c,
-                '-'| '+' | '0'..='9' |
-                '\u{0000}'..='\u{0020}' |
-                '\\'|'/'|'('|')'|'{'|'}'|';'|'['|']'|'='|'"'|'#' |
-                // whitespace, excluding 0x20
-                '\u{00a0}' | '\u{1680}' |
-                '\u{2000}'..='\u{200A}' |
-                '\u{202F}' | '\u{205F}' | '\u{3000}' | '\u{FEFF}' |
-                // newline (excluding <= 0x20)
-                '\u{0085}' | '\u{2028}' | '\u{2029}'
-            )
-        })
-        .map_err(|e| e.with_expected_kind("letter"))
-}
-
-fn ws<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
-    ws_char()
-        .repeated()
-        .at_least(1)
-        .ignored()
-        .or(ml_comment())
-        .map_err(|e| e.with_expected_kind("whitespace"))
-}
-
-fn comment<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
-    begin_comment('/')
-        .then(
-            any()
-                .and_is(newline().not())
-                .and_is(end().not())
-                .repeated()
-                .then(newline().or(end())),
-        )
-        .ignored()
-}
-
-fn ml_comment<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
-    recursive::<_, _, Error, _, _>(|comment| {
-        choice((
-            comment,
-            none_of('*').ignored(),
-            just('*').then_ignore(none_of('/').rewind()).ignored(),
-        ))
-        .repeated()
-        .ignored()
-        .delimited_by(begin_comment('*'), just("*/"))
-    })
-    .map_err_with_state(|e, span, _state| {
-        let span: Span = span.into();
-        if matches!(
-            &e,
-            ParseError::Unexpected {
-                found: TokenFormat::Eoi,
-                ..
-            }
-        ) && span.length() > 2
-        {
-            e.merge(ParseError::Unclosed {
-                label: "comment",
-                opened_at: span.at_start(2),
-                opened: "/*".into(),
-                expected_at: span.at_end(),
-                expected: "*/".into(),
-                found: None.into(),
-            })
-        } else {
-            // otherwise opening /* is not matched
-            e
-        }
-    })
-}
-
-fn raw_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
-    let matching_hashes = just('#')
-        .repeated()
-        .configure(|cfg, hash_num| cfg.exactly(*hash_num));
-    just('#')
-        .repeated()
-        .at_least(1)
-        .count()
-        .then_ignore(just('"'))
-        .ignore_with_ctx(
-            any()
-                .and_is(just('"').then(matching_hashes).not())
-                .repeated()
-                .to_slice()
-                .then(just('"').ignore_then(matching_hashes.ignored()))
-                .map_err_with(move |e: ParseError, extras| {
-                    let hash_num = *extras.ctx();
-                    if matches!(
-                        &e,
-                        ParseError::Unexpected {
-                            found: TokenFormat::Eoi,
-                            ..
-                        }
-                    ) {
-                        e.merge(ParseError::Unclosed {
-                            label: "raw string",
-                            opened_at: Span::from(extras.span()).before_start(hash_num + 2),
-                            opened: TokenFormat::OpenRaw(hash_num),
-                            expected_at: Span::from(extras.span()).at_end(),
-                            expected: TokenFormat::CloseRaw(hash_num),
-                            found: None.into(),
-                        })
-                    } else {
-                        e
+fn nodes<'src>() -> impl Parser<'src, Input<'src>, Vec<SpannedNode>, Error> + Clone {
+    use PropOrArg::*;
+    recursive(|nodes| {
+        let braced_nodes = just('{').ignore_then(nodes.then_ignore(just('}')).map_err_with_state(
+            |e, span: SimpleSpan, _state| {
+                if matches!(
+                    &e,
+                    ParseError::Unexpected {
+                        found: TokenFormat::Eoi,
+                        ..
                     }
-                }),
-        )
-        .map(|text| text.0.into())
-}
-
-fn string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
-    choice((raw_string(), escaped_string()))
-}
-
-fn expected_kind(s: &'static str) -> BTreeSet<TokenFormat> {
-    [TokenFormat::Kind(s)].into_iter().collect()
-}
-
-fn esc_char<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
-    any::<_, Error>()
-        .try_map(|c, span| match c {
-            '"' | '\\' => Ok(c),
-            'b' => Ok('\u{0008}'),
-            'f' => Ok('\u{000C}'),
-            'n' => Ok('\n'),
-            'r' => Ok('\r'),
-            't' => Ok('\t'),
-            's' => Ok(' '),
-            _ => Err(ParseError::Unexpected {
-                label: Some("invalid escape char"),
-                span: span.into(),
-                found: c.into(),
-                expected: "\"\\bfnrts".chars().map(|c| c.into()).collect(),
-            }),
-        })
-        .or(just('u').ignore_then(
-            any::<_, Error>()
-                .try_map(|c, span| {
-                    c.is_ascii_hexdigit()
-                        .then_some(c)
-                        .ok_or_else(|| ParseError::Unexpected {
-                            label: Some("unexpected character"),
-                            span: span.into(),
-                            found: c.into(),
-                            expected: expected_kind("hexadecimal digit"),
-                        })
-                })
-                .repeated()
-                .at_least(1)
-                .at_most(6)
-                .to_slice()
-                .delimited_by(just('{'), just('}'))
-                .validate(|hex_chars, extras, emit| {
-                    u32::from_str_radix(hex_chars, 16)
-                        .map_err(|e| e.to_string())
-                        .and_then(|n| char::try_from(n).map_err(|e| e.to_string()))
-                        .unwrap_or_else(|e| {
-                            emit.emit(ParseError::Message {
-                                label: Some("invalid character code"),
-                                span: extras.span().into(),
-                                message: e.to_string(),
-                            });
-                            '\0'
-                        })
-                }),
-        ))
-}
-
-fn escaped_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
-    just('"').ignore_then(
-        choice((
-            none_of(['"', '\\']),
-            just('\\').ignore_then(esc_char()),
-            // ws-escape
-            just('\\')
-                .then(ws_char().or(newline()).repeated().at_least(1))
-                .map(|_| ' '),
-        ))
-        .repeated()
-        .collect::<String>()
-        .then_ignore(just('"'))
-        .map(|val| val.into())
-        .map_err_with_state(|e: ParseError, span, _state| {
-            if matches!(
-                &e,
-                ParseError::Unexpected {
-                    found: TokenFormat::Eoi,
-                    ..
+                ) {
+                    e.merge(ParseError::Unclosed {
+                        label: "curly braces",
+                        // we know it's `{` at the start of the span
+                        opened_at: Span::from(span).before_start(1),
+                        opened: '{'.into(),
+                        expected_at: Span::from(span).at_end(),
+                        expected: '}'.into(),
+                        found: None.into(),
+                    })
+                } else {
+                    e
                 }
-            ) {
-                e.merge(ParseError::Unclosed {
-                    label: "string",
-                    opened_at: Span::from(span).before_start(1),
-                    opened: '"'.into(),
-                    expected_at: Span::from(span).at_end(),
-                    expected: '"'.into(),
-                    found: None.into(),
-                })
-            } else {
-                e
-            }
-        }),
-    )
-}
+            },
+        ));
 
-fn bare_ident<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
-    let sign = just('+').or(just('-'));
-    choice((
-        // unambiguous-ident
-        id_sans_sign_dig_point()
-            .then(id_char().repeated())
-            .to_slice(),
-        // signed-ident
-        sign.then(id_sans_dig_point().then(id_char().repeated()).or_not())
-            .to_slice(),
-        // dotted-ident
-        sign.or_not()
-            .then(just('.'))
-            .then(id_sans_dig().then(id_char().repeated()).or_not())
-            .to_slice(),
-    ))
-    .map(|v: &str| Box::<str>::from(v))
-    .try_map(|s, span| match &s[..] {
-        "true" | "false" | "null" | "nan" | "inf" | "-inf" => Err(ParseError::Message {
-            label: Some("illegal identifier"),
-            span: span.into(),
-            message: format!("`{s}` is not allowed as a bare string"),
-        }),
-        "#true" => Err(ParseError::Unexpected {
-            label: Some("keyword"),
-            span: span.into(),
-            found: TokenFormat::Token("#true"),
-            expected: expected_kind("identifier"),
-        }),
-        "#false" => Err(ParseError::Unexpected {
-            label: Some("keyword"),
-            span: span.into(),
-            found: TokenFormat::Token("#false"),
-            expected: expected_kind("identifier"),
-        }),
-        "#null" => Err(ParseError::Unexpected {
-            label: Some("keyword"),
-            span: span.into(),
-            found: TokenFormat::Token("#null"),
-            expected: expected_kind("identifier"),
-        }),
-        "#nan" => Err(ParseError::Unexpected {
-            label: Some("keyword"),
-            span: span.into(),
-            found: TokenFormat::Token("#nan"),
-            expected: expected_kind("identifier"),
-        }),
-        "#inf" => Err(ParseError::Unexpected {
-            label: Some("keyword"),
-            span: span.into(),
-            found: TokenFormat::Token("#inf"),
-            expected: expected_kind("identifier"),
-        }),
-        "#-inf" => Err(ParseError::Unexpected {
-            label: Some("keyword"),
-            span: span.into(),
-            found: TokenFormat::Token("#-inf"),
-            expected: expected_kind("identifier"),
-        }),
-        _ => Ok(s),
-    })
-}
-
-fn ident<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
-    choice((
-        // match -123 so `-` will not be treated as an ident by backtracking
-        number().map(Err),
-        bare_ident().map(Ok),
-        string().map(Ok),
-    ))
-    // when backtracking is not already possible,
-    // throw error for numbers (mapped to `Result::Err`)
-    .validate(|res, extras, emit| {
-        res.unwrap_or_else(|_| {
-            emit.emit(ParseError::Unexpected {
-                label: Some("unexpected number"),
-                span: extras.span().into(),
-                found: TokenFormat::Kind("number"),
-                expected: expected_kind("identifier"),
+        let node = spanned(r#type().then_ignore(unicode_space().repeated()))
+            .or_not()
+            .then(spanned(identifier()))
+            .then(
+                node_space()
+                    .repeated()
+                    .at_least(1)
+                    .ignore_then(node_prop_or_arg())
+                    .repeated()
+                    .collect::<Vec<PropOrArg>>(),
+            )
+            .then(
+                node_space()
+                    .repeated()
+                    .ignore_then(
+                        begin_comment('-')
+                            .then_ignore(linespace().repeated())
+                            .or_not(),
+                    )
+                    .then(spanned(braced_nodes))
+                    .or_not(),
+            )
+            .then_ignore(node_space().repeated().then(node_terminator().or_not()))
+            .map(|(((type_name, node_name), line_items), opt_children)| {
+                let mut node = Node {
+                    type_name,
+                    node_name,
+                    properties: BTreeMap::new(),
+                    arguments: Vec::new(),
+                    children: match opt_children {
+                        Some((Some(_comment), _)) => None,
+                        Some((None, children)) => Some(children),
+                        None => None,
+                    },
+                };
+                for item in line_items {
+                    match item {
+                        Prop(name, value) => {
+                            node.properties.insert(name, value);
+                        }
+                        Arg(value) => {
+                            node.arguments.push(value);
+                        }
+                        Ignore => {}
+                    }
+                }
+                node
             });
-            "".into()
-        })
+
+        begin_comment('-')
+            .then_ignore(linespace().repeated())
+            .or_not()
+            .then(spanned(node))
+            .separated_by(linespace().repeated())
+            .allow_leading()
+            .allow_trailing()
+            .collect::<Vec<(Option<()>, Spanned<Node>)>>()
+            .map(|vec| {
+                vec.into_iter()
+                    .filter_map(
+                        |(comment, node)| {
+                            if comment.is_none() { Some(node) } else { None }
+                        },
+                    )
+                    .collect()
+            })
     })
-}
-
-fn keyword<'src>() -> impl Parser<'src, Input<'src>, Literal, Error> + Clone {
-    choice((
-        just("#null")
-            .map_err(|e: ParseError| e.with_expected_token("#null"))
-            .to(Literal::Null),
-        just("#true")
-            .map_err(|e: ParseError| e.with_expected_token("#true"))
-            .to(Literal::Bool(true)),
-        just("#false")
-            .map_err(|e: ParseError| e.with_expected_token("#false"))
-            .to(Literal::Bool(false)),
-        just("#nan")
-            .map_err(|e: ParseError| e.with_expected_token("#nan"))
-            .to(Literal::Nan),
-        just("#inf")
-            .map_err(|e: ParseError| e.with_expected_token("#inf"))
-            .to(Literal::Inf),
-        just("#-inf")
-            .map_err(|e: ParseError| e.with_expected_token("#-inf"))
-            .to(Literal::NegInf),
-    ))
-}
-
-fn digit<'src>(radix: u32) -> impl Parser<'src, Input<'src>, char, Error> + Clone {
-    any::<_, Error>().filter(move |c: &char| c.is_digit(radix))
-}
-
-fn digits<'src>(radix: u32) -> impl Parser<'src, Input<'src>, (), Error> + Clone {
-    any::<_, Error>()
-        .filter(move |c: &char| c == &'_' || c.is_digit(radix))
-        .repeated()
-}
-
-fn decimal_number<'src>() -> impl Parser<'src, Input<'src>, Literal, Error> + Clone {
-    just('-')
-        .or(just('+'))
-        .or_not()
-        .then(digit(10))
-        .then(digits(10))
-        .then(just('.').then(digit(10)).then(digits(10)).or_not())
-        .then(
-            just('e')
-                .or(just('E'))
-                .then(just('-').or(just('+')).or_not())
-                .then(digits(10))
-                .or_not(),
-        )
-        .to_slice()
-        .map(|v: &str| {
-            let is_decimal = v.chars().any(|c| matches!(c, '.' | 'e' | 'E'));
-            let s: String = v.chars().filter(|c| c != &'_').collect();
-            if is_decimal {
-                Literal::Decimal(Decimal(s.into()))
-            } else {
-                Literal::Int(Integer(Radix::Dec, s.into()))
-            }
-        })
-}
-
-fn radix_number<'src>() -> impl Parser<'src, Input<'src>, Literal, Error> + Clone {
-    just('-')
-        .or(just('+'))
-        .or_not()
-        .then_ignore(just('0'))
-        .then(choice((
-            just('b')
-                .ignore_then(digit(2).then(digits(2)).to_slice())
-                .map(|s| (Radix::Bin, s)),
-            just('o')
-                .ignore_then(digit(8).then(digits(8)).to_slice())
-                .map(|s| (Radix::Oct, s)),
-            just('x')
-                .ignore_then(digit(16).then(digits(16)).to_slice())
-                .map(|s| (Radix::Hex, s)),
-        )))
-        .map(|(sign, (radix, value))| {
-            let mut s = String::with_capacity(value.len() + sign.map_or(0, |_| 1));
-            if let Some(c) = sign {
-                s.push(c);
-            }
-            s.extend(value.chars().filter(|&c| c != '_'));
-            Literal::Int(Integer(radix, s.into()))
-        })
-}
-
-fn number<'src>() -> impl Parser<'src, Input<'src>, Literal, Error> + Clone {
-    radix_number().or(decimal_number())
-}
-
-fn literal<'src>() -> impl Parser<'src, Input<'src>, Literal, Error> + Clone {
-    // Check for `ident` last, because `ident` first checks for numbers,
-    // and it can confuse keywords with raw strings.
-    choice((keyword(), number(), ident().map(Literal::String)))
-}
-
-fn type_name<'src>() -> impl Parser<'src, Input<'src>, TypeName, Error> + Clone {
-    ident()
-        .delimited_by(
-            just('(').then(ws_char().repeated()),
-            ws_char().repeated().then(just(')')),
-        )
-        .map(TypeName::from_string)
-}
-
-fn spanned<'src, T, P>(p: P) -> impl Parser<'src, Input<'src>, Spanned<T>, Error> + Clone
-where
-    P: Parser<'src, Input<'src>, T, Error> + Clone,
-{
-    p.map_with(|value, e| Spanned {
-        span: e.span().into(),
-        value,
-    })
-}
-
-fn esc_line<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
-    just('\\')
-        .ignore_then(ws().repeated())
-        .ignore_then(comment().or(newline()).or(end()))
-}
-
-fn node_space<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
-    ws().or(esc_line())
-}
-
-fn node_terminator<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
-    choice((newline(), comment(), just(';').ignored(), end()))
 }
 
 #[derive(Clone)]
@@ -525,29 +120,21 @@ enum PropOrArg {
     Ignore,
 }
 
-fn type_name_value<'src>() -> impl Parser<'src, Input<'src>, Value, Error> + Clone {
-    spanned(type_name().then_ignore(ws_char().repeated()))
-        .then(spanned(literal()))
-        .map(|(type_name, literal)| Value {
-            type_name: Some(type_name),
-            literal,
-        })
+fn node_prop_or_arg<'src>() -> impl Parser<'src, Input<'src>, PropOrArg, Error> + Clone {
+    begin_comment('-')
+        .ignore_then(linespace().repeated())
+        .ignore_then(node_prop_or_arg_inner())
+        .to(PropOrArg::Ignore)
+        .or(node_prop_or_arg_inner())
 }
 
-fn value<'src>() -> impl Parser<'src, Input<'src>, Value, Error> + Clone {
-    type_name_value().or(spanned(literal()).map(|literal| Value {
-        type_name: None,
-        literal,
-    }))
-}
-
-fn prop_or_arg_inner<'src>() -> impl Parser<'src, Input<'src>, PropOrArg, Error> + Clone {
+fn node_prop_or_arg_inner<'src>() -> impl Parser<'src, Input<'src>, PropOrArg, Error> + Clone {
     use PropOrArg::*;
 
-    let equals_value = ws_char()
+    let equals_value = unicode_space()
         .repeated()
         .then(just('='))
-        .then(ws_char().repeated())
+        .then(unicode_space().repeated())
         .ignore_then(value());
 
     choice((
@@ -609,7 +196,7 @@ fn prop_or_arg_inner<'src>() -> impl Parser<'src, Input<'src>, PropOrArg, Error>
                     value.unwrap(),
                 )
             }),
-        spanned(bare_ident())
+        spanned(bare_identifier())
             .then(equals_value.or_not())
             .validate(|(name, value), e, emit| {
                 if let Some(value) = value {
@@ -632,125 +219,542 @@ fn prop_or_arg_inner<'src>() -> impl Parser<'src, Input<'src>, PropOrArg, Error>
     ))
 }
 
-fn prop_or_arg<'src>() -> impl Parser<'src, Input<'src>, PropOrArg, Error> + Clone {
-    begin_comment('-')
-        .ignore_then(line_space().repeated())
-        .ignore_then(prop_or_arg_inner())
-        .to(PropOrArg::Ignore)
-        .or(prop_or_arg_inner())
+fn node_space<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
+    ws().or(escline())
 }
 
-fn line_space<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
-    newline().or(ws()).or(comment())
+fn node_terminator<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
+    choice((newline(), single_line_comment(), just(';').ignored(), end()))
 }
 
-fn nodes<'src>() -> impl Parser<'src, Input<'src>, Vec<SpannedNode>, Error> + Clone {
-    use PropOrArg::*;
-    recursive(|nodes| {
-        let braced_nodes = just('{').ignore_then(nodes.then_ignore(just('}')).map_err_with_state(
-            |e, span: SimpleSpan, _state| {
-                if matches!(
-                    &e,
-                    ParseError::Unexpected {
-                        found: TokenFormat::Eoi,
-                        ..
-                    }
-                ) {
-                    e.merge(ParseError::Unclosed {
-                        label: "curly braces",
-                        // we know it's `{` at the start of the span
-                        opened_at: Span::from(span).before_start(1),
-                        opened: '{'.into(),
-                        expected_at: Span::from(span).at_end(),
-                        expected: '}'.into(),
-                        found: None.into(),
-                    })
-                } else {
-                    e
-                }
-            },
-        ));
-
-        let node = spanned(type_name().then_ignore(ws_char().repeated()))
-            .or_not()
-            .then(spanned(ident()))
-            .then(
-                node_space()
-                    .repeated()
-                    .at_least(1)
-                    .ignore_then(prop_or_arg())
-                    .repeated()
-                    .collect::<Vec<PropOrArg>>(),
-            )
-            .then(
-                node_space()
-                    .repeated()
-                    .ignore_then(
-                        begin_comment('-')
-                            .then_ignore(line_space().repeated())
-                            .or_not(),
-                    )
-                    .then(spanned(braced_nodes))
-                    .or_not(),
-            )
-            .then_ignore(node_space().repeated().then(node_terminator().or_not()))
-            .map(|(((type_name, node_name), line_items), opt_children)| {
-                let mut node = Node {
-                    type_name,
-                    node_name,
-                    properties: BTreeMap::new(),
-                    arguments: Vec::new(),
-                    children: match opt_children {
-                        Some((Some(_comment), _)) => None,
-                        Some((None, children)) => Some(children),
-                        None => None,
-                    },
-                };
-                for item in line_items {
-                    match item {
-                        Prop(name, value) => {
-                            node.properties.insert(name, value);
-                        }
-                        Arg(value) => {
-                            node.arguments.push(value);
-                        }
-                        Ignore => {}
-                    }
-                }
-                node
+fn identifier<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
+    choice((
+        // match -123 so `-` will not be treated as an ident by backtracking
+        number().map(Err),
+        bare_identifier().map(Ok),
+        string().map(Ok),
+    ))
+    // when backtracking is not already possible,
+    // throw error for numbers (mapped to `Result::Err`)
+    .validate(|res, extras, emit| {
+        res.unwrap_or_else(|_| {
+            emit.emit(ParseError::Unexpected {
+                label: Some("unexpected number"),
+                span: extras.span().into(),
+                found: TokenFormat::Kind("number"),
+                expected: expected_kind("identifier"),
             });
-
-        begin_comment('-')
-            .then_ignore(line_space().repeated())
-            .or_not()
-            .then(spanned(node))
-            .separated_by(line_space().repeated())
-            .allow_leading()
-            .allow_trailing()
-            .collect::<Vec<(Option<()>, Spanned<Node>)>>()
-            .map(|vec| {
-                vec.into_iter()
-                    .filter_map(
-                        |(comment, node)| {
-                            if comment.is_none() { Some(node) } else { None }
-                        },
-                    )
-                    .collect()
-            })
+            "".into()
+        })
     })
 }
 
-pub(crate) fn document<'src>() -> impl Parser<'src, Input<'src>, Document, Error> {
-    just('\u{FEFF}')
+fn bare_identifier<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
+    let sign = just('+').or(just('-'));
+    choice((
+        // unambiguous-ident
+        id_sans_sign_dig_point()
+            .then(identifier_char().repeated())
+            .to_slice(),
+        // signed-ident
+        sign.then(
+            id_sans_dig_point()
+                .then(identifier_char().repeated())
+                .or_not(),
+        )
+        .to_slice(),
+        // dotted-ident
+        sign.or_not()
+            .then(just('.'))
+            .then(id_sans_dig().then(identifier_char().repeated()).or_not())
+            .to_slice(),
+    ))
+    .map(|v: &str| Box::<str>::from(v))
+    .try_map(|s, span| match &s[..] {
+        "true" | "false" | "null" | "nan" | "inf" | "-inf" => Err(ParseError::Message {
+            label: Some("illegal identifier"),
+            span: span.into(),
+            message: format!("`{s}` is not allowed as a bare string"),
+        }),
+        "#true" => Err(ParseError::Unexpected {
+            label: Some("keyword"),
+            span: span.into(),
+            found: TokenFormat::Token("#true"),
+            expected: expected_kind("identifier"),
+        }),
+        "#false" => Err(ParseError::Unexpected {
+            label: Some("keyword"),
+            span: span.into(),
+            found: TokenFormat::Token("#false"),
+            expected: expected_kind("identifier"),
+        }),
+        "#null" => Err(ParseError::Unexpected {
+            label: Some("keyword"),
+            span: span.into(),
+            found: TokenFormat::Token("#null"),
+            expected: expected_kind("identifier"),
+        }),
+        "#nan" => Err(ParseError::Unexpected {
+            label: Some("keyword"),
+            span: span.into(),
+            found: TokenFormat::Token("#nan"),
+            expected: expected_kind("identifier"),
+        }),
+        "#inf" => Err(ParseError::Unexpected {
+            label: Some("keyword"),
+            span: span.into(),
+            found: TokenFormat::Token("#inf"),
+            expected: expected_kind("identifier"),
+        }),
+        "#-inf" => Err(ParseError::Unexpected {
+            label: Some("keyword"),
+            span: span.into(),
+            found: TokenFormat::Token("#-inf"),
+            expected: expected_kind("identifier"),
+        }),
+        _ => Ok(s),
+    })
+}
+
+fn id_sans_dig<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
+    any::<_, Error>()
+        .filter(|c| {
+            !matches!(c,
+                '0'..='9' |
+                '\u{0000}'..='\u{0020}' |
+                '\\'|'/'|'('|')'|'{'|'}'|';'|'['|']'|'='|'"'|'#' |
+                // whitespace, excluding 0x20
+                '\u{00a0}' | '\u{1680}' |
+                '\u{2000}'..='\u{200A}' |
+                '\u{202F}' | '\u{205F}' | '\u{3000}' | '\u{FEFF}' |
+                // newline (excluding <= 0x20)
+                '\u{0085}' | '\u{2028}' | '\u{2029}'
+            )
+        })
+        .map_err(|e| e.with_expected_kind("letter"))
+}
+
+fn id_sans_dig_point<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
+    any::<_, Error>()
+        .filter(|c| {
+            !matches!(c,
+                '0'..='9' | '.' |
+                '\u{0000}'..='\u{0020}' |
+                '\\'|'/'|'('|')'|'{'|'}'|';'|'['|']'|'='|'"'|'#' |
+                // whitespace, excluding 0x20
+                '\u{00a0}' | '\u{1680}' |
+                '\u{2000}'..='\u{200A}' |
+                '\u{202F}' | '\u{205F}' | '\u{3000}' | '\u{FEFF}' |
+                // newline (excluding <= 0x20)
+                '\u{0085}' | '\u{2028}' | '\u{2029}'
+            )
+        })
+        .map_err(|e| e.with_expected_kind("letter"))
+}
+
+fn id_sans_sign_dig_point<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
+    any::<_, Error>()
+        .filter(|c| {
+            !matches!(c,
+                '-'| '+' | '0'..='9' |
+                '\u{0000}'..='\u{0020}' |
+                '\\'|'/'|'('|')'|'{'|'}'|';'|'['|']'|'='|'"'|'#' |
+                // whitespace, excluding 0x20
+                '\u{00a0}' | '\u{1680}' |
+                '\u{2000}'..='\u{200A}' |
+                '\u{202F}' | '\u{205F}' | '\u{3000}' | '\u{FEFF}' |
+                // newline (excluding <= 0x20)
+                '\u{0085}' | '\u{2028}' | '\u{2029}'
+            )
+        })
+        .map_err(|e| e.with_expected_kind("letter"))
+}
+
+fn identifier_char<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
+    any::<_, Error>()
+        .filter(|c| {
+            !matches!(c,
+                '\u{0000}'..='\u{0021}' |
+                '\\'|'/'|'('|')'|'{'|'}'|';'|'['|']'|'='|'"'|'#' |
+                // whitespace, excluding 0x20
+                '\u{00a0}' | '\u{1680}' |
+                '\u{2000}'..='\u{200A}' |
+                '\u{202F}' | '\u{205F}' | '\u{3000}' | '\u{FEFF}' |
+                // newline (excluding <= 0x20)
+                '\u{0085}' | '\u{2028}' | '\u{2029}'
+            )
+        })
+        .map_err(|e| e.with_expected_kind("letter"))
+}
+
+fn keyword<'src>() -> impl Parser<'src, Input<'src>, Literal, Error> + Clone {
+    choice((
+        just("#null")
+            .map_err(|e: ParseError| e.with_expected_token("#null"))
+            .to(Literal::Null),
+        just("#true")
+            .map_err(|e: ParseError| e.with_expected_token("#true"))
+            .to(Literal::Bool(true)),
+        just("#false")
+            .map_err(|e: ParseError| e.with_expected_token("#false"))
+            .to(Literal::Bool(false)),
+        just("#nan")
+            .map_err(|e: ParseError| e.with_expected_token("#nan"))
+            .to(Literal::Nan),
+        just("#inf")
+            .map_err(|e: ParseError| e.with_expected_token("#inf"))
+            .to(Literal::Inf),
+        just("#-inf")
+            .map_err(|e: ParseError| e.with_expected_token("#-inf"))
+            .to(Literal::NegInf),
+    ))
+}
+
+fn value<'src>() -> impl Parser<'src, Input<'src>, Value, Error> + Clone {
+    type_name_value().or(spanned(literal()).map(|literal| Value {
+        type_name: None,
+        literal,
+    }))
+}
+
+fn r#type<'src>() -> impl Parser<'src, Input<'src>, TypeName, Error> + Clone {
+    identifier()
+        .delimited_by(
+            just('(').then(unicode_space().repeated()),
+            unicode_space().repeated().then(just(')')),
+        )
+        .map(TypeName::from_string)
+}
+
+fn type_name_value<'src>() -> impl Parser<'src, Input<'src>, Value, Error> + Clone {
+    spanned(r#type().then_ignore(unicode_space().repeated()))
+        .then(spanned(literal()))
+        .map(|(type_name, literal)| Value {
+            type_name: Some(type_name),
+            literal,
+        })
+}
+
+fn string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
+    choice((raw_string(), escaped_string()))
+}
+
+fn escaped_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
+    just('"').ignore_then(
+        choice((
+            none_of(['"', '\\']),
+            just('\\').ignore_then(escape()),
+            // ws-escape
+            just('\\')
+                .then(unicode_space().or(newline()).repeated().at_least(1))
+                .map(|_| ' '),
+        ))
+        .repeated()
+        .collect::<String>()
+        .then_ignore(just('"'))
+        .map(|val| val.into())
+        .map_err_with_state(|e: ParseError, span, _state| {
+            if matches!(
+                &e,
+                ParseError::Unexpected {
+                    found: TokenFormat::Eoi,
+                    ..
+                }
+            ) {
+                e.merge(ParseError::Unclosed {
+                    label: "string",
+                    opened_at: Span::from(span).before_start(1),
+                    opened: '"'.into(),
+                    expected_at: Span::from(span).at_end(),
+                    expected: '"'.into(),
+                    found: None.into(),
+                })
+            } else {
+                e
+            }
+        }),
+    )
+}
+
+fn escape<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
+    any::<_, Error>()
+        .try_map(|c, span| match c {
+            '"' | '\\' => Ok(c),
+            'b' => Ok('\u{0008}'),
+            'f' => Ok('\u{000C}'),
+            'n' => Ok('\n'),
+            'r' => Ok('\r'),
+            't' => Ok('\t'),
+            's' => Ok(' '),
+            _ => Err(ParseError::Unexpected {
+                label: Some("invalid escape char"),
+                span: span.into(),
+                found: c.into(),
+                expected: "\"\\bfnrts".chars().map(|c| c.into()).collect(),
+            }),
+        })
+        .or(just('u').ignore_then(
+            any::<_, Error>()
+                .try_map(|c, span| {
+                    c.is_ascii_hexdigit()
+                        .then_some(c)
+                        .ok_or_else(|| ParseError::Unexpected {
+                            label: Some("unexpected character"),
+                            span: span.into(),
+                            found: c.into(),
+                            expected: expected_kind("hexadecimal digit"),
+                        })
+                })
+                .repeated()
+                .at_least(1)
+                .at_most(6)
+                .to_slice()
+                .delimited_by(just('{'), just('}'))
+                .validate(|hex_chars, extras, emit| {
+                    u32::from_str_radix(hex_chars, 16)
+                        .map_err(|e| e.to_string())
+                        .and_then(|n| char::try_from(n).map_err(|e| e.to_string()))
+                        .unwrap_or_else(|e| {
+                            emit.emit(ParseError::Message {
+                                label: Some("invalid character code"),
+                                span: extras.span().into(),
+                                message: e.to_string(),
+                            });
+                            '\0'
+                        })
+                }),
+        ))
+}
+
+fn radix_number<'src>() -> impl Parser<'src, Input<'src>, Literal, Error> + Clone {
+    just('-')
+        .or(just('+'))
         .or_not()
-        .ignore_then(nodes())
-        .map(|nodes| Document { nodes })
+        .then_ignore(just('0'))
+        .then(choice((
+            just('b')
+                .ignore_then(digit(2).then(integer(2)).to_slice())
+                .map(|s| (Radix::Bin, s)),
+            just('o')
+                .ignore_then(digit(8).then(integer(8)).to_slice())
+                .map(|s| (Radix::Oct, s)),
+            just('x')
+                .ignore_then(digit(16).then(integer(16)).to_slice())
+                .map(|s| (Radix::Hex, s)),
+        )))
+        .map(|(sign, (radix, value))| {
+            let mut s = String::with_capacity(value.len() + sign.map_or(0, |_| 1));
+            if let Some(c) = sign {
+                s.push(c);
+            }
+            s.extend(value.chars().filter(|&c| c != '_'));
+            Literal::Int(Integer(radix, s.into()))
+        })
+}
+
+fn raw_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
+    let matching_hashes = just('#')
+        .repeated()
+        .configure(|cfg, hash_num| cfg.exactly(*hash_num));
+    just('#')
+        .repeated()
+        .at_least(1)
+        .count()
+        .then_ignore(just('"'))
+        .ignore_with_ctx(
+            any()
+                .and_is(just('"').then(matching_hashes).not())
+                .repeated()
+                .to_slice()
+                .then(just('"').ignore_then(matching_hashes.ignored()))
+                .map_err_with(move |e: ParseError, extras| {
+                    let hash_num = *extras.ctx();
+                    if matches!(
+                        &e,
+                        ParseError::Unexpected {
+                            found: TokenFormat::Eoi,
+                            ..
+                        }
+                    ) {
+                        e.merge(ParseError::Unclosed {
+                            label: "raw string",
+                            opened_at: Span::from(extras.span()).before_start(hash_num + 2),
+                            opened: TokenFormat::OpenRaw(hash_num),
+                            expected_at: Span::from(extras.span()).at_end(),
+                            expected: TokenFormat::CloseRaw(hash_num),
+                            found: None.into(),
+                        })
+                    } else {
+                        e
+                    }
+                }),
+        )
+        .map(|text| text.0.into())
+}
+
+fn number<'src>() -> impl Parser<'src, Input<'src>, Literal, Error> + Clone {
+    radix_number().or(decimal())
+}
+
+fn decimal<'src>() -> impl Parser<'src, Input<'src>, Literal, Error> + Clone {
+    just('-')
+        .or(just('+'))
+        .or_not()
+        .then(digit(10))
+        .then(integer(10))
+        .then(just('.').then(digit(10)).then(integer(10)).or_not())
+        .then(
+            just('e')
+                .or(just('E'))
+                .then(just('-').or(just('+')).or_not())
+                .then(integer(10))
+                .or_not(),
+        )
+        .to_slice()
+        .map(|v: &str| {
+            let is_decimal = v.chars().any(|c| matches!(c, '.' | 'e' | 'E'));
+            let s: String = v.chars().filter(|c| c != &'_').collect();
+            if is_decimal {
+                Literal::Decimal(Decimal(s.into()))
+            } else {
+                Literal::Int(Integer(Radix::Dec, s.into()))
+            }
+        })
+}
+
+fn integer<'src>(radix: u32) -> impl Parser<'src, Input<'src>, (), Error> + Clone {
+    any::<_, Error>()
+        .filter(move |c: &char| c == &'_' || c.is_digit(radix))
+        .repeated()
+}
+
+fn digit<'src>(radix: u32) -> impl Parser<'src, Input<'src>, char, Error> + Clone {
+    any::<_, Error>().filter(move |c: &char| c.is_digit(radix))
+}
+
+fn literal<'src>() -> impl Parser<'src, Input<'src>, Literal, Error> + Clone {
+    // Check for `ident` last, because `ident` first checks for numbers,
+    // and it can confuse keywords with raw strings.
+    choice((keyword(), number(), identifier().map(Literal::String)))
+}
+
+fn escline<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
+    just('\\')
+        .ignore_then(ws().repeated())
+        .ignore_then(single_line_comment().or(newline()).or(end()))
+}
+
+fn linespace<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
+    newline().or(ws()).or(single_line_comment())
+}
+
+fn newline<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
+    just('\r')
+        .or_not()
+        .ignore_then(just('\n'))
+        .or(just('\r')) // Carriage return
+        .or(just('\x0C')) // Form feed
+        .or(just('\x0B')) // Vertical tab
+        .or(just('\u{0085}')) // Next line
+        .or(just('\u{2028}')) // Line separator
+        .or(just('\u{2029}')) // Paragraph separator
+        .ignored()
+        .map_err(|e: ParseError| e.with_expected_kind("newline"))
+}
+
+fn ws<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
+    unicode_space()
+        .repeated()
+        .at_least(1)
+        .ignored()
+        .or(multi_line_comment())
+        .map_err(|e| e.with_expected_kind("whitespace"))
+}
+
+fn unicode_space<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
+    any::<_, Error>()
+        .filter(|c| {
+            matches!(
+                c,
+                '\t' | ' ' | '\u{00a0}' | '\u{1680}' | '\u{2000}'
+                    ..='\u{200A}' | '\u{202F}' | '\u{205F}' | '\u{3000}'
+            )
+        })
+        .ignored()
+}
+
+fn single_line_comment<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
+    begin_comment('/')
+        .then(
+            any()
+                .and_is(newline().not())
+                .and_is(end().not())
+                .repeated()
+                .then(newline().or(end())),
+        )
+        .ignored()
+}
+
+fn multi_line_comment<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
+    recursive::<_, _, Error, _, _>(|comment| {
+        choice((
+            comment,
+            none_of('*').ignored(),
+            just('*').then_ignore(none_of('/').rewind()).ignored(),
+        ))
+        .repeated()
+        .ignored()
+        .delimited_by(begin_comment('*'), just("*/"))
+    })
+    .map_err_with_state(|e, span, _state| {
+        let span: Span = span.into();
+        if matches!(
+            &e,
+            ParseError::Unexpected {
+                found: TokenFormat::Eoi,
+                ..
+            }
+        ) && span.length() > 2
+        {
+            e.merge(ParseError::Unclosed {
+                label: "comment",
+                opened_at: span.at_start(2),
+                opened: "/*".into(),
+                expected_at: span.at_end(),
+                expected: "*/".into(),
+                found: None.into(),
+            })
+        } else {
+            // otherwise opening /* is not matched
+            e
+        }
+    })
+}
+
+fn begin_comment<'src>(which: char) -> impl Parser<'src, Input<'src>, (), Error> + Clone {
+    just('/')
+        .map_err(|e: ParseError| e.with_no_expected())
+        .ignore_then(just(which).ignored())
+}
+
+fn expected_kind(s: &'static str) -> BTreeSet<TokenFormat> {
+    [TokenFormat::Kind(s)].into_iter().collect()
+}
+
+fn spanned<'src, T, P>(p: P) -> impl Parser<'src, Input<'src>, Spanned<T>, Error> + Clone
+where
+    P: Parser<'src, Input<'src>, T, Error> + Clone,
+{
+    p.map_with(|value, e| Spanned {
+        span: e.span().into(),
+        value,
+    })
 }
 
 #[cfg(test)]
 mod test {
     use super::{Error, Input};
-    use super::{comment, ident, literal, ml_comment, string, type_name, ws};
+    use super::{identifier, literal, multi_line_comment, single_line_comment, string, r#type, ws};
     use super::{nodes, number};
     use crate::ast::{Decimal, Integer, Literal, Radix, TypeName};
     use crate::errors::Error as MietteError;
@@ -800,16 +804,18 @@ mod test {
 
     #[test]
     fn parse_comments() {
-        parse(comment(), "//hello").unwrap();
-        parse(comment(), "//hello\n").unwrap();
-        parse(ml_comment(), "/*nothing*/").unwrap();
-        parse(ml_comment(), "/*nothing**/").unwrap();
-        parse(ml_comment(), "/*no*thing*/").unwrap();
-        parse(ml_comment(), "/*no/**/thing*/").unwrap();
-        parse(ml_comment(), "/*no/*/**/*/thing*/").unwrap();
-        parse(ws().then(comment()), "   // hello").unwrap();
+        parse(single_line_comment(), "//hello").unwrap();
+        parse(single_line_comment(), "//hello\n").unwrap();
+        parse(multi_line_comment(), "/*nothing*/").unwrap();
+        parse(multi_line_comment(), "/*nothing**/").unwrap();
+        parse(multi_line_comment(), "/*no*thing*/").unwrap();
+        parse(multi_line_comment(), "/*no/**/thing*/").unwrap();
+        parse(multi_line_comment(), "/*no/*/**/*/thing*/").unwrap();
+        parse(ws().then(single_line_comment()), "   // hello").unwrap();
         parse(
-            ws().then(comment()).then(ws()).then(comment()),
+            ws().then(single_line_comment())
+                .then(ws())
+                .then(single_line_comment()),
             "   // hello\n   //world",
         )
         .unwrap();
@@ -1172,29 +1178,29 @@ mod test {
 
     #[test]
     fn parse_ident() {
-        assert_eq!(&*parse(ident(), "abcdef").unwrap(), "abcdef");
-        assert_eq!(&*parse(ident(), "xx_cd$yy").unwrap(), "xx_cd$yy");
-        assert_eq!(&*parse(ident(), "-").unwrap(), "-");
-        assert_eq!(&*parse(ident(), "--hello").unwrap(), "--hello");
-        assert_eq!(&*parse(ident(), "--hello1234").unwrap(), "--hello1234");
-        assert_eq!(&*parse(ident(), "--1").unwrap(), "--1");
-        assert_eq!(&*parse(ident(), "++1").unwrap(), "++1");
-        assert_eq!(&*parse(ident(), "-hello").unwrap(), "-hello");
-        assert_eq!(&*parse(ident(), "+hello").unwrap(), "+hello");
-        assert_eq!(&*parse(ident(), "-A").unwrap(), "-A");
-        assert_eq!(&*parse(ident(), "+b").unwrap(), "+b");
+        assert_eq!(&*parse(identifier(), "abcdef").unwrap(), "abcdef");
+        assert_eq!(&*parse(identifier(), "xx_cd$yy").unwrap(), "xx_cd$yy");
+        assert_eq!(&*parse(identifier(), "-").unwrap(), "-");
+        assert_eq!(&*parse(identifier(), "--hello").unwrap(), "--hello");
+        assert_eq!(&*parse(identifier(), "--hello1234").unwrap(), "--hello1234");
+        assert_eq!(&*parse(identifier(), "--1").unwrap(), "--1");
+        assert_eq!(&*parse(identifier(), "++1").unwrap(), "++1");
+        assert_eq!(&*parse(identifier(), "-hello").unwrap(), "-hello");
+        assert_eq!(&*parse(identifier(), "+hello").unwrap(), "+hello");
+        assert_eq!(&*parse(identifier(), "-A").unwrap(), "-A");
+        assert_eq!(&*parse(identifier(), "+b").unwrap(), "+b");
         assert_eq!(
-            &*parse(ident().then_ignore(ws()), "adef   ").unwrap(),
+            &*parse(identifier().then_ignore(ws()), "adef   ").unwrap(),
             "adef"
         );
         assert_eq!(
-            &*parse(ident().then_ignore(ws()), "a123@   ").unwrap(),
+            &*parse(identifier().then_ignore(ws()), "a123@   ").unwrap(),
             "a123@"
         );
-        parse(ident(), "1abc").unwrap_err();
-        parse(ident(), "-1").unwrap_err();
-        parse(ident(), "-1test").unwrap_err();
-        parse(ident(), "+1").unwrap_err();
+        parse(identifier(), "1abc").unwrap_err();
+        parse(identifier(), "-1").unwrap_err();
+        parse(identifier(), "-1test").unwrap_err();
+        parse(identifier(), "+1").unwrap_err();
     }
 
     #[test]
@@ -1340,20 +1346,20 @@ mod test {
     #[test]
     fn parse_type() {
         assert_eq!(
-            parse(type_name(), "(abcdef)").unwrap(),
+            parse(r#type(), "(abcdef)").unwrap(),
             TypeName::from_string("abcdef".into())
         );
         assert_eq!(
-            parse(type_name(), "(xx_cd$yy)").unwrap(),
+            parse(r#type(), "(xx_cd$yy)").unwrap(),
             TypeName::from_string("xx_cd$yy".into())
         );
-        parse(type_name(), "(1abc)").unwrap_err();
+        parse(r#type(), "(1abc)").unwrap_err();
         assert_eq!(
-            parse(type_name(), "( abc)").unwrap(),
+            parse(r#type(), "( abc)").unwrap(),
             TypeName::from_string("abc".into())
         );
         assert_eq!(
-            parse(type_name(), "(abc )").unwrap(),
+            parse(r#type(), "(abc )").unwrap(),
             TypeName::from_string("abc".into())
         );
     }
@@ -1361,7 +1367,7 @@ mod test {
     #[test]
     fn parse_type_err() {
         err_eq!(
-            parse(type_name(), "(123)"),
+            parse(r#type(), "(123)"),
             r#"{
             "message": "error parsing KDL",
             "severity": "error",
@@ -1380,7 +1386,7 @@ mod test {
         );
 
         err_eq!(
-            parse(type_name(), "(-1)"),
+            parse(r#type(), "(-1)"),
             r#"{
             "message": "error parsing KDL",
             "severity": "error",
