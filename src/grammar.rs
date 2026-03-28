@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use chumsky::input::Emitter;
 use chumsky::prelude::*;
 
 use crate::ast::{Decimal, Integer, Literal, Node, Radix, TypeName, Value};
@@ -449,7 +450,7 @@ fn identifier_char<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clon
         .map_err(|e: ParseError| e.with_expected_kind("letter"))
 }
 
-// Like identifier_char but also excludes digits
+// (identifier-char - digit)
 fn id_sans_dig<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
     any::<_, Error>()
         .filter(|c| {
@@ -466,7 +467,7 @@ fn id_sans_dig<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
         .map_err(|e: ParseError| e.with_expected_kind("letter"))
 }
 
-// Like identifier_char but also excludes digits and '.'
+// (identifier-char - digit - '.')
 fn id_sans_dig_point<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
     any::<_, Error>()
         .filter(|c| {
@@ -483,7 +484,7 @@ fn id_sans_dig_point<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Cl
         .map_err(|e: ParseError| e.with_expected_kind("letter"))
 }
 
-// Like identifier_char but also excludes sign, digits, and '.'
+// (identifier-char - digit - sign - '.')
 fn id_sans_sign_dig_point<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
     any::<_, Error>()
         .filter(|c| {
@@ -607,33 +608,11 @@ fn multi_line_quoted_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, 
         .then_ignore(just("\"\"\""))
         .validate(|content: &str, extras, emit| {
             let span = Span::from(extras.span());
-            let content_len = content.len();
 
             let (dedented, indent_len) = match dedent_multiline_string(content) {
                 Ok(d) => d,
                 Err(e) => {
-                    let (label, error_span, message) = match e {
-                        MultilineStringError::NoOpeningNewline => (
-                            "must be followed by newline",
-                            span.before_start(3),
-                            "opening delimiter must be immediately followed by a newline",
-                        ),
-                        MultilineStringError::ClosingNotOnOwnLine => (
-                            "must be on its own line",
-                            Span(span.0 + content_len, span.1),
-                            "closing delimiter must be on its own line with only whitespace prefix",
-                        ),
-                        MultilineStringError::InsufficientIndent { offset, length } => (
-                            "insufficient indentation",
-                            Span(span.0 + offset, span.0 + offset + length),
-                            "line must start with the same whitespace as the closing delimiter",
-                        ),
-                    };
-                    emit.emit(ParseError::Message {
-                        label: Some(label),
-                        span: error_span,
-                        message: message.to_string(),
-                    });
+                    emit_multiline_dedent_error(e, span, 3, 3, emit);
                     return "".into();
                 }
             };
@@ -732,28 +711,7 @@ fn raw_string_quotes<'src>(
                 match dedent_multiline_string(content) {
                     Ok((dedented, _indent_len)) => dedented.into(),
                     Err(e) => {
-                        let (label, error_span, message) = match e {
-                            MultilineStringError::NoOpeningNewline => (
-                                "must be followed by newline",
-                                span.before_start(hash_num + 3),
-                                "opening delimiter must be immediately followed by a newline",
-                            ),
-                            MultilineStringError::ClosingNotOnOwnLine => (
-                                "must be on its own line",
-                                Span(span.1 - 3 - hash_num, span.1),
-                                "closing delimiter must be on its own line with only whitespace prefix",
-                            ),
-                            MultilineStringError::InsufficientIndent { offset, length } => (
-                                "insufficient indentation",
-                                Span(span.0 + offset, span.0 + offset + length),
-                                "line must start with the same whitespace as the closing delimiter",
-                            ),
-                        };
-                        emit.emit(ParseError::Message {
-                            label: Some(label),
-                            span: error_span,
-                            message: message.to_string(),
-                        });
+                        emit_multiline_dedent_error(e, span, hash_num + 3, 3 + hash_num, emit);
                         "".into()
                     }
                 }
@@ -1096,6 +1054,40 @@ enum MultilineStringError {
     NoOpeningNewline,
     ClosingNotOnOwnLine,
     InsufficientIndent { offset: usize, length: usize },
+}
+
+/// Emit a parse error for a multiline string dedent failure.
+/// `opening_delimiter_len` is the length of the opening delimiter (e.g. 3 for `"""`, 3+hashes for raw).
+/// `closing_delimiter_len` is the length of the closing delimiter.
+fn emit_multiline_dedent_error(
+    e: MultilineStringError,
+    span: Span,
+    opening_delimiter_len: usize,
+    closing_delimiter_len: usize,
+    emit: &mut Emitter<ParseError>,
+) {
+    let (label, error_span, message) = match e {
+        MultilineStringError::NoOpeningNewline => (
+            "must be followed by newline",
+            span.before_start(opening_delimiter_len),
+            "opening delimiter must be immediately followed by a newline",
+        ),
+        MultilineStringError::ClosingNotOnOwnLine => (
+            "must be on its own line",
+            Span(span.1 - closing_delimiter_len, span.1),
+            "closing delimiter must be on its own line with only whitespace prefix",
+        ),
+        MultilineStringError::InsufficientIndent { offset, length } => (
+            "insufficient indentation",
+            Span(span.0 + offset, span.0 + offset + length),
+            "line must start with the same whitespace as the closing delimiter",
+        ),
+    };
+    emit.emit(ParseError::Message {
+        label: Some(label),
+        span: error_span,
+        message: message.to_string(),
+    });
 }
 
 /// Dedent a multi-line string based on the closing line's whitespace prefix.
