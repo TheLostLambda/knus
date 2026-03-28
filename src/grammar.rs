@@ -10,41 +10,52 @@ use crate::span::{Span, Spanned};
 type Error = extra::Err<ParseError>;
 type Input<'src> = &'src str;
 
+// document := bom? version? nodes
 pub(crate) fn document<'src>() -> impl Parser<'src, Input<'src>, Document, Error> {
-    just('\u{FEFF}')
+    bom()
         .or_not()
+        .ignore_then(version().or_not())
         .ignore_then(nodes())
         .map(|nodes| Document { nodes })
 }
 
+// nodes := (line-space* node)* line-space*
 fn nodes<'src>() -> impl Parser<'src, Input<'src>, Vec<SpannedNode>, Error> + Clone {
     use PropOrArg::*;
     recursive(|nodes| {
-        let braced_nodes = just('{').ignore_then(nodes.then_ignore(just('}')).map_err_with_state(
-            |e, span: SimpleSpan, _state| {
-                if matches!(
-                    &e,
-                    ParseError::Unexpected {
-                        found: TokenFormat::Eoi,
-                        ..
-                    }
-                ) {
-                    e.merge(ParseError::Unclosed {
-                        label: "curly braces",
-                        // we know it's `{` at the start of the span
-                        opened_at: Span::from(span).before_start(1),
-                        opened: '{'.into(),
-                        expected_at: Span::from(span).at_end(),
-                        expected: '}'.into(),
-                        found: None.into(),
-                    })
-                } else {
-                    e
-                }
-            },
-        ));
+        let braced_nodes = just('{')
+            .ignore_then(
+                nodes
+                    .then_ignore(just('}'))
+                    .map_err_with_state(|e, span: SimpleSpan, _state| {
+                        if matches!(
+                            &e,
+                            ParseError::Unexpected {
+                                found: TokenFormat::Eoi,
+                                ..
+                            }
+                        ) {
+                            e.merge(ParseError::Unclosed {
+                                label: "curly braces",
+                                opened_at: Span::from(span).before_start(1),
+                                opened: '{'.into(),
+                                expected_at: Span::from(span).at_end(),
+                                expected: '}'.into(),
+                                found: None.into(),
+                            })
+                        } else {
+                            e
+                        }
+                    }),
+            );
 
-        let node = spanned(r#type().then_ignore(unicode_space().repeated()))
+        // base-node := slashdash? type? node-space* string
+        //     (node-space* (node-space | slashdash) node-prop-or-arg)*
+        //     (node-space* slashdash node-children)*
+        //     (node-space* node-children)?
+        //     (node-space* slashdash node-children)*
+        //     node-space*
+        let base_node = spanned(r#type().then_ignore(node_space().repeated()))
             .or_not()
             .then(spanned(identifier()))
             .then(
@@ -59,14 +70,14 @@ fn nodes<'src>() -> impl Parser<'src, Input<'src>, Vec<SpannedNode>, Error> + Cl
                 node_space()
                     .repeated()
                     .ignore_then(
-                        begin_comment('-')
-                            .then_ignore(linespace().repeated())
+                        slashdash()
+                            .then_ignore(line_space().repeated())
                             .or_not(),
                     )
                     .then(spanned(braced_nodes))
                     .or_not(),
             )
-            .then_ignore(node_space().repeated().then(node_terminator().or_not()))
+            .then_ignore(node_space().repeated())
             .map(|(((type_name, node_name), line_items), opt_children)| {
                 let mut node = Node {
                     type_name,
@@ -93,21 +104,28 @@ fn nodes<'src>() -> impl Parser<'src, Input<'src>, Vec<SpannedNode>, Error> + Cl
                 node
             });
 
-        begin_comment('-')
-            .then_ignore(linespace().repeated())
+        // node := base-node node-terminator
+        // Include terminator inside spanned() so node span covers the terminator
+        let node = spanned(base_node.then_ignore(node_terminator()));
+
+        // nodes := (line-space* node)* line-space*
+        slashdash()
+            .then_ignore(line_space().repeated())
             .or_not()
-            .then(spanned(node))
-            .separated_by(linespace().repeated())
+            .then(node)
+            .separated_by(line_space().repeated())
             .allow_leading()
             .allow_trailing()
             .collect::<Vec<(Option<()>, Spanned<Node>)>>()
             .map(|vec| {
                 vec.into_iter()
-                    .filter_map(
-                        |(comment, node)| {
-                            if comment.is_none() { Some(node) } else { None }
-                        },
-                    )
+                    .filter_map(|(comment, node)| {
+                        if comment.is_none() {
+                            Some(node)
+                        } else {
+                            None
+                        }
+                    })
                     .collect()
             })
     })
@@ -120,9 +138,10 @@ enum PropOrArg {
     Ignore,
 }
 
+// node-prop-or-arg := prop | value
 fn node_prop_or_arg<'src>() -> impl Parser<'src, Input<'src>, PropOrArg, Error> + Clone {
-    begin_comment('-')
-        .ignore_then(linespace().repeated())
+    slashdash()
+        .ignore_then(line_space().repeated())
         .ignore_then(node_prop_or_arg_inner())
         .to(PropOrArg::Ignore)
         .or(node_prop_or_arg_inner())
@@ -131,6 +150,10 @@ fn node_prop_or_arg<'src>() -> impl Parser<'src, Input<'src>, PropOrArg, Error> 
 fn node_prop_or_arg_inner<'src>() -> impl Parser<'src, Input<'src>, PropOrArg, Error> + Clone {
     use PropOrArg::*;
 
+    // prop := string node-space* '=' node-space* value
+    // Note: we use unicode_space (not node_space) around '=' so that
+    // escline is not allowed around the equals sign. This prevents
+    // ambiguity where `a\\\n=b` would parse `a` as a property name.
     let equals_value = unicode_space()
         .repeated()
         .then(just('='))
@@ -196,7 +219,7 @@ fn node_prop_or_arg_inner<'src>() -> impl Parser<'src, Input<'src>, PropOrArg, E
                     value.unwrap(),
                 )
             }),
-        spanned(bare_identifier())
+        spanned(identifier_string())
             .then(equals_value.or_not())
             .validate(|(name, value), e, emit| {
                 if let Some(value) = value {
@@ -219,19 +242,45 @@ fn node_prop_or_arg_inner<'src>() -> impl Parser<'src, Input<'src>, PropOrArg, E
     ))
 }
 
-fn node_space<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
-    ws().or(escline())
-}
-
+// node-terminator := single-line-comment | newline | ';' | eof
 fn node_terminator<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
     choice((newline(), single_line_comment(), just(';').ignored(), end()))
 }
 
+// value := type? node-space* (string | number | keyword)
+fn value<'src>() -> impl Parser<'src, Input<'src>, Value, Error> + Clone {
+    type_name_value().or(spanned(literal()).map(|literal| Value {
+        type_name: None,
+        literal,
+    }))
+}
+
+fn type_name_value<'src>() -> impl Parser<'src, Input<'src>, Value, Error> + Clone {
+    spanned(r#type().then_ignore(node_space().repeated()))
+        .then(spanned(literal()))
+        .map(|(type_name, literal)| Value {
+            type_name: Some(type_name),
+            literal,
+        })
+}
+
+// type := '(' node-space* string node-space* ')'
+fn r#type<'src>() -> impl Parser<'src, Input<'src>, TypeName, Error> + Clone {
+    identifier()
+        .delimited_by(
+            just('(').then(node_space().repeated()),
+            node_space().repeated().then(just(')')),
+        )
+        .map(TypeName::from_string)
+}
+
+// An identifier is a string used as node name or type name.
+// It can be a bare identifier, a quoted/raw string, or a number (which is an error).
 fn identifier<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
     choice((
         // match -123 so `-` will not be treated as an ident by backtracking
         number().map(Err),
-        bare_identifier().map(Ok),
+        identifier_string().map(Ok),
         string().map(Ok),
     ))
     // when backtracking is not already possible,
@@ -249,127 +298,125 @@ fn identifier<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone
     })
 }
 
-fn bare_identifier<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
-    let sign = just('+').or(just('-'));
+// literal := keyword | keyword-number | number | string
+fn literal<'src>() -> impl Parser<'src, Input<'src>, Literal, Error> + Clone {
+    // Check for `ident` last, because `ident` first checks for numbers,
+    // and it can confuse keywords with raw strings.
     choice((
-        // unambiguous-ident
-        id_sans_sign_dig_point()
-            .then(identifier_char().repeated())
-            .to_slice(),
-        // signed-ident
-        sign.then(
+        keyword(),
+        keyword_number(),
+        number(),
+        identifier().map(Literal::String),
+    ))
+}
+
+// string := identifier-string | quoted-string | raw-string
+fn string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
+    // Beware the order: multi-line variants must be tried before single-line variants
+    // to ensure #""" is parsed as multi-line raw string, not single-line with content "".
+    choice((
+        multiline_raw_string(),
+        raw_string(),
+        multiline_escaped_string(),
+        escaped_string(),
+    ))
+}
+
+// identifier-string :=
+//     (unambiguous-ident | signed-ident | dotted-ident)
+//     - disallowed-keyword-identifiers
+fn identifier_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
+    choice((
+        // unambiguous-ident: (identifier-char - digit - sign - '.') identifier-char*
+        unambiguous_ident(),
+        // signed-ident: sign ((identifier-char - digit - '.') identifier-char*)?
+        signed_ident(),
+        // dotted-ident: sign? '.' ((identifier-char - digit) identifier-char*)?
+        dotted_ident(),
+    ))
+    .map(|v: &str| Box::<str>::from(v))
+    .try_map(|s, span| {
+        // disallowed-keyword-identifiers
+        match &s[..] {
+            "true" | "false" | "null" | "nan" | "inf" | "-inf" => Err(ParseError::Message {
+                label: Some("illegal identifier"),
+                span: span.into(),
+                message: format!("`{s}` is not allowed as a bare string"),
+            }),
+            "#true" => Err(ParseError::Unexpected {
+                label: Some("keyword"),
+                span: span.into(),
+                found: TokenFormat::Token("#true"),
+                expected: expected_kind("identifier"),
+            }),
+            "#false" => Err(ParseError::Unexpected {
+                label: Some("keyword"),
+                span: span.into(),
+                found: TokenFormat::Token("#false"),
+                expected: expected_kind("identifier"),
+            }),
+            "#null" => Err(ParseError::Unexpected {
+                label: Some("keyword"),
+                span: span.into(),
+                found: TokenFormat::Token("#null"),
+                expected: expected_kind("identifier"),
+            }),
+            "#nan" => Err(ParseError::Unexpected {
+                label: Some("keyword"),
+                span: span.into(),
+                found: TokenFormat::Token("#nan"),
+                expected: expected_kind("identifier"),
+            }),
+            "#inf" => Err(ParseError::Unexpected {
+                label: Some("keyword"),
+                span: span.into(),
+                found: TokenFormat::Token("#inf"),
+                expected: expected_kind("identifier"),
+            }),
+            "#-inf" => Err(ParseError::Unexpected {
+                label: Some("keyword"),
+                span: span.into(),
+                found: TokenFormat::Token("#-inf"),
+                expected: expected_kind("identifier"),
+            }),
+            _ => Ok(s),
+        }
+    })
+}
+
+// unambiguous-ident := (identifier-char - digit - sign - '.') identifier-char*
+fn unambiguous_ident<'src>() -> impl Parser<'src, Input<'src>, &'src str, Error> + Clone {
+    id_sans_sign_dig_point()
+        .then(identifier_char().repeated())
+        .to_slice()
+}
+
+// signed-ident := sign ((identifier-char - digit - '.') identifier-char*)?
+fn signed_ident<'src>() -> impl Parser<'src, Input<'src>, &'src str, Error> + Clone {
+    sign_char()
+        .then(
             id_sans_dig_point()
                 .then(identifier_char().repeated())
                 .or_not(),
         )
-        .to_slice(),
-        // dotted-ident
-        sign.or_not()
-            .then(just('.'))
-            .then(id_sans_dig().then(identifier_char().repeated()).or_not())
-            .to_slice(),
-    ))
-    .map(|v: &str| Box::<str>::from(v))
-    .try_map(|s, span| match &s[..] {
-        "true" | "false" | "null" | "nan" | "inf" | "-inf" => Err(ParseError::Message {
-            label: Some("illegal identifier"),
-            span: span.into(),
-            message: format!("`{s}` is not allowed as a bare string"),
-        }),
-        "#true" => Err(ParseError::Unexpected {
-            label: Some("keyword"),
-            span: span.into(),
-            found: TokenFormat::Token("#true"),
-            expected: expected_kind("identifier"),
-        }),
-        "#false" => Err(ParseError::Unexpected {
-            label: Some("keyword"),
-            span: span.into(),
-            found: TokenFormat::Token("#false"),
-            expected: expected_kind("identifier"),
-        }),
-        "#null" => Err(ParseError::Unexpected {
-            label: Some("keyword"),
-            span: span.into(),
-            found: TokenFormat::Token("#null"),
-            expected: expected_kind("identifier"),
-        }),
-        "#nan" => Err(ParseError::Unexpected {
-            label: Some("keyword"),
-            span: span.into(),
-            found: TokenFormat::Token("#nan"),
-            expected: expected_kind("identifier"),
-        }),
-        "#inf" => Err(ParseError::Unexpected {
-            label: Some("keyword"),
-            span: span.into(),
-            found: TokenFormat::Token("#inf"),
-            expected: expected_kind("identifier"),
-        }),
-        "#-inf" => Err(ParseError::Unexpected {
-            label: Some("keyword"),
-            span: span.into(),
-            found: TokenFormat::Token("#-inf"),
-            expected: expected_kind("identifier"),
-        }),
-        _ => Ok(s),
-    })
+        .to_slice()
 }
 
-fn id_sans_dig<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
-    any::<_, Error>()
-        .filter(|c| {
-            !matches!(c,
-                '0'..='9' |
-                '\u{0000}'..='\u{0020}' |
-                '\\'|'/'|'('|')'|'{'|'}'|';'|'['|']'|'='|'"'|'#' |
-                // whitespace, excluding 0x20
-                '\u{00a0}' | '\u{1680}' |
-                '\u{2000}'..='\u{200A}' |
-                '\u{202F}' | '\u{205F}' | '\u{3000}' | '\u{FEFF}' |
-                // newline (excluding <= 0x20)
-                '\u{0085}' | '\u{2028}' | '\u{2029}'
-            )
-        })
-        .map_err(|e| e.with_expected_kind("letter"))
+// dotted-ident := sign? '.' ((identifier-char - digit) identifier-char*)?
+fn dotted_ident<'src>() -> impl Parser<'src, Input<'src>, &'src str, Error> + Clone {
+    sign_char()
+        .or_not()
+        .then(just('.'))
+        .then(id_sans_dig().then(identifier_char().repeated()).or_not())
+        .to_slice()
 }
 
-fn id_sans_dig_point<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
-    any::<_, Error>()
-        .filter(|c| {
-            !matches!(c,
-                '0'..='9' | '.' |
-                '\u{0000}'..='\u{0020}' |
-                '\\'|'/'|'('|')'|'{'|'}'|';'|'['|']'|'='|'"'|'#' |
-                // whitespace, excluding 0x20
-                '\u{00a0}' | '\u{1680}' |
-                '\u{2000}'..='\u{200A}' |
-                '\u{202F}' | '\u{205F}' | '\u{3000}' | '\u{FEFF}' |
-                // newline (excluding <= 0x20)
-                '\u{0085}' | '\u{2028}' | '\u{2029}'
-            )
-        })
-        .map_err(|e| e.with_expected_kind("letter"))
+fn sign_char<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
+    just('+').or(just('-'))
 }
 
-fn id_sans_sign_dig_point<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
-    any::<_, Error>()
-        .filter(|c| {
-            !matches!(c,
-                '-'| '+' | '0'..='9' |
-                '\u{0000}'..='\u{0020}' |
-                '\\'|'/'|'('|')'|'{'|'}'|';'|'['|']'|'='|'"'|'#' |
-                // whitespace, excluding 0x20
-                '\u{00a0}' | '\u{1680}' |
-                '\u{2000}'..='\u{200A}' |
-                '\u{202F}' | '\u{205F}' | '\u{3000}' | '\u{FEFF}' |
-                // newline (excluding <= 0x20)
-                '\u{0085}' | '\u{2028}' | '\u{2029}'
-            )
-        })
-        .map_err(|e| e.with_expected_kind("letter"))
-}
-
+// identifier-char := unicode - unicode-space - newline - [\\/(){};\[\]"#=]
+//     - disallowed-literal-code-points
 fn identifier_char<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
     any::<_, Error>()
         .filter(|c| {
@@ -384,68 +431,61 @@ fn identifier_char<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clon
                 '\u{0085}' | '\u{2028}' | '\u{2029}'
             )
         })
-        .map_err(|e| e.with_expected_kind("letter"))
+        .map_err(|e: ParseError| e.with_expected_kind("letter"))
 }
 
-fn keyword<'src>() -> impl Parser<'src, Input<'src>, Literal, Error> + Clone {
-    choice((
-        just("#null")
-            .map_err(|e: ParseError| e.with_expected_token("#null"))
-            .to(Literal::Null),
-        just("#true")
-            .map_err(|e: ParseError| e.with_expected_token("#true"))
-            .to(Literal::Bool(true)),
-        just("#false")
-            .map_err(|e: ParseError| e.with_expected_token("#false"))
-            .to(Literal::Bool(false)),
-        just("#nan")
-            .map_err(|e: ParseError| e.with_expected_token("#nan"))
-            .to(Literal::Nan),
-        just("#inf")
-            .map_err(|e: ParseError| e.with_expected_token("#inf"))
-            .to(Literal::Inf),
-        just("#-inf")
-            .map_err(|e: ParseError| e.with_expected_token("#-inf"))
-            .to(Literal::NegInf),
-    ))
-}
-
-fn value<'src>() -> impl Parser<'src, Input<'src>, Value, Error> + Clone {
-    type_name_value().or(spanned(literal()).map(|literal| Value {
-        type_name: None,
-        literal,
-    }))
-}
-
-fn r#type<'src>() -> impl Parser<'src, Input<'src>, TypeName, Error> + Clone {
-    identifier()
-        .delimited_by(
-            just('(').then(unicode_space().repeated()),
-            unicode_space().repeated().then(just(')')),
-        )
-        .map(TypeName::from_string)
-}
-
-fn type_name_value<'src>() -> impl Parser<'src, Input<'src>, Value, Error> + Clone {
-    spanned(r#type().then_ignore(unicode_space().repeated()))
-        .then(spanned(literal()))
-        .map(|(type_name, literal)| Value {
-            type_name: Some(type_name),
-            literal,
+// Like identifier_char but also excludes digits
+fn id_sans_dig<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
+    any::<_, Error>()
+        .filter(|c| {
+            !matches!(c,
+                '0'..='9' |
+                '\u{0000}'..='\u{0020}' |
+                '\\'|'/'|'('|')'|'{'|'}'|';'|'['|']'|'='|'"'|'#' |
+                '\u{00a0}' | '\u{1680}' |
+                '\u{2000}'..='\u{200A}' |
+                '\u{202F}' | '\u{205F}' | '\u{3000}' | '\u{FEFF}' |
+                '\u{0085}' | '\u{2028}' | '\u{2029}'
+            )
         })
+        .map_err(|e: ParseError| e.with_expected_kind("letter"))
 }
 
-fn string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
-    // Beware the order: multi-line variants must be tried before single-line variants
-    // to ensure #""" is parsed as multi-line raw string, not single-line with content "".
-    choice((
-        multiline_raw_string(),
-        raw_string(),
-        multiline_escaped_string(),
-        escaped_string(),
-    ))
+// Like identifier_char but also excludes digits and '.'
+fn id_sans_dig_point<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
+    any::<_, Error>()
+        .filter(|c| {
+            !matches!(c,
+                '0'..='9' | '.' |
+                '\u{0000}'..='\u{0020}' |
+                '\\'|'/'|'('|')'|'{'|'}'|';'|'['|']'|'='|'"'|'#' |
+                '\u{00a0}' | '\u{1680}' |
+                '\u{2000}'..='\u{200A}' |
+                '\u{202F}' | '\u{205F}' | '\u{3000}' | '\u{FEFF}' |
+                '\u{0085}' | '\u{2028}' | '\u{2029}'
+            )
+        })
+        .map_err(|e: ParseError| e.with_expected_kind("letter"))
 }
 
+// Like identifier_char but also excludes sign, digits, and '.'
+fn id_sans_sign_dig_point<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
+    any::<_, Error>()
+        .filter(|c| {
+            !matches!(c,
+                '-'| '+' | '0'..='9' |
+                '\u{0000}'..='\u{0020}' |
+                '\\'|'/'|'('|')'|'{'|'}'|';'|'['|']'|'='|'"'|'#' |
+                '\u{00a0}' | '\u{1680}' |
+                '\u{2000}'..='\u{200A}' |
+                '\u{202F}' | '\u{205F}' | '\u{3000}' | '\u{FEFF}' |
+                '\u{0085}' | '\u{2028}' | '\u{2029}'
+            )
+        })
+        .map_err(|e: ParseError| e.with_expected_kind("letter"))
+}
+
+// Single-line escaped string: '"' single-line-string-body '"'
 fn escaped_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
     // Single quote only - reject """ which is multi-line syntax
     just('"')
@@ -486,6 +526,7 @@ fn escaped_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + C
         )
 }
 
+// string-character escape handling
 fn escape<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
     any::<_, Error>()
         .try_map(|c, span| match c {
@@ -536,32 +577,94 @@ fn escape<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
         ))
 }
 
-fn radix_number<'src>() -> impl Parser<'src, Input<'src>, Literal, Error> + Clone {
-    just('-')
-        .or(just('+'))
-        .or_not()
-        .then_ignore(just('0'))
-        .then(choice((
-            just('b')
-                .ignore_then(digit(2).then(integer(2)).to_slice())
-                .map(|s| (Radix::Bin, s)),
-            just('o')
-                .ignore_then(digit(8).then(integer(8)).to_slice())
-                .map(|s| (Radix::Oct, s)),
-            just('x')
-                .ignore_then(digit(16).then(integer(16)).to_slice())
-                .map(|s| (Radix::Hex, s)),
-        )))
-        .map(|(sign, (radix, value))| {
-            let mut s = String::with_capacity(value.len() + sign.map_or(0, |_| 1));
-            if let Some(c) = sign {
-                s.push(c);
+/// Multi-line quoted string parser: """..."""
+fn multiline_escaped_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
+    just("\"\"\"").ignore_then(
+        // Capture raw content - one or two quotes are allowed, but not three
+        choice((
+            // One double-quote that isn't followed by two more (not """)
+            just('"').then_ignore(just("\"\"").not().rewind()),
+            // Regular character (not quote)
+            none_of(['"']),
+        ))
+        .repeated()
+        .to_slice()
+        .then_ignore(just("\"\"\""))
+        .validate(|content: &str, extras, emit| {
+            let span = Span::from(extras.span());
+            let content_len = content.len();
+
+            let (dedented, indent_len) = match dedent_multiline_string(content) {
+                Ok(d) => d,
+                Err(e) => {
+                    let (label, error_span, message) = match e {
+                        MultilineStringError::NoOpeningNewline => (
+                            "must be followed by newline",
+                            span.before_start(3),
+                            "opening delimiter must be immediately followed by a newline",
+                        ),
+                        MultilineStringError::ClosingNotOnOwnLine => (
+                            "must be on its own line",
+                            Span(span.0 + content_len, span.1),
+                            "closing delimiter must be on its own line with only whitespace prefix",
+                        ),
+                        MultilineStringError::InsufficientIndent { offset, length } => (
+                            "insufficient indentation",
+                            Span(span.0 + offset, span.0 + offset + length),
+                            "line must start with the same whitespace as the closing delimiter",
+                        ),
+                    };
+                    emit.emit(ParseError::Message {
+                        label: Some(label),
+                        span: error_span,
+                        message: message.to_string(),
+                    });
+                    return "".into();
+                }
+            };
+
+            match process_escapes(&dedented) {
+                Ok(processed) => processed.into(),
+                Err((start, end, msg)) => {
+                    let newlines_before_start = dedented[..start].matches('\n').count();
+                    let newlines_before_end = dedented[..end].matches('\n').count();
+                    let content_start = 1 + indent_len + start + newlines_before_start * indent_len;
+                    let content_end = 1 + indent_len + end + newlines_before_end * indent_len;
+                    let error_span = Span(span.0 + content_start, span.0 + content_end);
+                    emit.emit(ParseError::Message {
+                        label: Some("invalid escape sequence"),
+                        span: error_span,
+                        message: msg,
+                    });
+                    "".into()
+                }
             }
-            s.extend(value.chars().filter(|&c| c != '_'));
-            Literal::Int(Integer(radix, s.into()))
         })
+        .map_err_with_state(|e: ParseError, span: SimpleSpan, _state| {
+            let span: Span = span.into();
+            if matches!(
+                &e,
+                ParseError::Unexpected {
+                    found: TokenFormat::Eoi,
+                    ..
+                }
+            ) {
+                e.merge(ParseError::Unclosed {
+                    label: "multi-line string",
+                    opened_at: span.before_start(3),
+                    opened: TokenFormat::OpenMultiline,
+                    expected_at: span.at_end(),
+                    expected: TokenFormat::CloseMultiline,
+                    found: None.into(),
+                })
+            } else {
+                e
+            }
+        }),
+    )
 }
 
+// raw-string := '#' raw-string-quotes '#' | '#' raw-string '#'
 fn raw_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
     let matching_hashes = just('#')
         .repeated()
@@ -601,349 +704,6 @@ fn raw_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone
                 }),
         )
         .map(|text| text.0.into())
-}
-
-/// Normalize newlines: convert all newline variants to LF
-fn normalize_newlines(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\r' => {
-                // CRLF or CR -> LF
-                if chars.peek() == Some(&'\n') {
-                    chars.next();
-                }
-                result.push('\n');
-            }
-            '\x0C' | '\x0B' | '\u{0085}' | '\u{2028}' | '\u{2029}' => {
-                // Form feed, vertical tab, next line, line/paragraph separator -> LF
-                result.push('\n');
-            }
-            _ => result.push(c),
-        }
-    }
-    result
-}
-
-/// Check if a character is a KDL whitespace character
-fn is_kdl_ws(c: char) -> bool {
-    matches!(
-        c,
-        '\t' | ' ' | '\u{00a0}' | '\u{1680}' | '\u{2000}'
-            ..='\u{200A}' | '\u{202F}' | '\u{205F}' | '\u{3000}'
-    )
-}
-
-/// Error type for multi-line string dedentation with location information
-enum MultilineStringError {
-    /// Opening delimiter not followed by newline
-    NoOpeningNewline,
-    /// Closing delimiter has non-whitespace before it on same line
-    ClosingNotOnOwnLine,
-    /// A line doesn't start with required indent (offset within content, length of line)
-    InsufficientIndent { offset: usize, length: usize },
-}
-
-/// Dedent a multi-line string based on the closing line's whitespace prefix.
-/// Also strips the first and last newlines.
-/// Returns (dedented_string, indent_byte_len) where indent_byte_len is the byte length
-/// of the indentation that was stripped from each line.
-fn dedent_multiline_string(s: &str) -> Result<(String, usize), MultilineStringError> {
-    // Normalize newlines first
-    let normalized = normalize_newlines(s);
-
-    // The structure should be: <newline><content-lines><newline><indent>
-    // Where the opening newline is required, and the closing newline + indent forms the final line
-
-    // Find the last newline - this separates the content from the closing indent
-    let last_newline_pos = match normalized.rfind('\n') {
-        Some(pos) => pos,
-        None => {
-            // No newline at all - invalid
-            return Err(MultilineStringError::NoOpeningNewline);
-        }
-    };
-
-    // The indent is everything after the last newline
-    let indent = &normalized[last_newline_pos + 1..];
-    let indent_len = indent.len();
-
-    // Validate that indent is all whitespace
-    if !indent.chars().all(is_kdl_ws) {
-        return Err(MultilineStringError::ClosingNotOnOwnLine);
-    }
-
-    // Content before the last newline
-    let before_last_newline = &normalized[..last_newline_pos];
-
-    // Special case: empty multi-line string (just one newline)
-    // Structure: """<newline>"""  -> content between delimiters is just "\n"
-    if before_last_newline.is_empty() {
-        // The entire content was just a newline, representing an empty string
-        return Ok((String::new(), indent_len));
-    }
-
-    // The content must start with a newline (the one after opening delimiter)
-    if !before_last_newline.starts_with('\n') {
-        return Err(MultilineStringError::NoOpeningNewline);
-    }
-
-    // Strip the first newline to get the actual content lines
-    let content = &before_last_newline[1..];
-
-    // Dedent each line, tracking offset for error reporting
-    let mut result = String::with_capacity(content.len());
-    let mut offset_in_content = 0usize;
-    let mut first = true;
-    for line in content.split('\n') {
-        if !first {
-            result.push('\n');
-        }
-        first = false;
-
-        // Whitespace-only lines are kept as empty (don't need to match indent)
-        if line.chars().all(is_kdl_ws) {
-            offset_in_content += line.len() + 1; // +1 for the newline
-            continue;
-        }
-
-        // Non-whitespace lines must start with the indent
-        if !line.starts_with(indent) {
-            // Offset in original content: 1 (for first newline) + offset_in_content
-            // Length is just the whitespace prefix (in bytes), not the whole line
-            let ws_prefix_byte_len: usize = line
-                .chars()
-                .take_while(|c| is_kdl_ws(*c))
-                .map(|c| c.len_utf8())
-                .sum();
-            return Err(MultilineStringError::InsufficientIndent {
-                offset: 1 + offset_in_content,
-                length: ws_prefix_byte_len,
-            });
-        }
-        result.push_str(&line[indent.len()..]);
-        offset_in_content += line.len() + 1; // +1 for the newline
-    }
-
-    Ok((result, indent_len))
-}
-
-/// Process escape sequences in a string
-/// Error from process_escapes: (start_offset, end_offset, message)
-/// Offsets are byte positions relative to the input string.
-fn process_escapes(s: &str) -> Result<String, (usize, usize, String)> {
-    let mut result = String::with_capacity(s.len());
-    let mut chars = s.char_indices().peekable();
-
-    while let Some((i, c)) = chars.next() {
-        if c == '\\' {
-            match chars.next() {
-                Some((_, '"')) => result.push('"'),
-                Some((_, '\\')) => result.push('\\'),
-                Some((_, 'b')) => result.push('\u{0008}'),
-                Some((_, 'f')) => result.push('\u{000C}'),
-                Some((_, 'n')) => result.push('\n'),
-                Some((_, 'r')) => result.push('\r'),
-                Some((_, 't')) => result.push('\t'),
-                Some((_, 's')) => result.push(' '),
-                Some((_, 'u')) => {
-                    // Parse unicode escape \u{XXXX}
-                    'check_brace: {
-                        let char_len = match chars.next() {
-                            Some((_, '{')) => {
-                                break 'check_brace;
-                            }
-                            Some((_, c)) => c.len_utf8(),
-                            None => {
-                                // String ended after \u
-                                0
-                            }
-                        };
-                        // Point to \u and the wrong char
-                        return Err((i, i + 2 + char_len, "expected '{' after \\u".to_string()));
-                    }
-                    let mut hex = String::new();
-                    let close_pos = loop {
-                        match chars.next() {
-                            Some((j, '}')) => {
-                                break j + 1;
-                            }
-                            Some((j, c)) if c.is_ascii_hexdigit() => {
-                                if hex.len() >= 6 {
-                                    // Too many digits - span the whole escape up to and including the excess digit
-                                    return Err((
-                                        i,
-                                        j + c.len_utf8(),
-                                        "unicode escape too long".to_string(),
-                                    ));
-                                }
-                                hex.push(c);
-                            }
-                            Some((j, c)) => {
-                                // Invalid character - span the whole escape up to and including the invalid char
-                                return Err((
-                                    i,
-                                    j + c.len_utf8(),
-                                    format!("invalid character '{}' in unicode escape", c),
-                                ));
-                            }
-                            None => {
-                                // Unclosed - point from \ to end of string
-                                return Err((i, s.len(), "unclosed unicode escape".to_string()));
-                            }
-                        }
-                    };
-                    if hex.is_empty() {
-                        // Empty \u{} - point to the whole escape
-                        return Err((i, close_pos, "empty unicode escape".to_string()));
-                    }
-                    let code = u32::from_str_radix(&hex, 16).unwrap();
-                    match char::try_from(code) {
-                        Ok(c) => result.push(c),
-                        Err(_) => {
-                            // Invalid code point - point to the whole escape
-                            return Err((
-                                i,
-                                close_pos,
-                                format!("invalid unicode code point: {}", code),
-                            ));
-                        }
-                    }
-                }
-                Some((_, c)) if c == ' ' || c == '\t' || c == '\n' || is_kdl_ws(c) => {
-                    // Whitespace escape: consume whitespace and newlines, produce space
-                    while let Some(&(_, next)) = chars.peek() {
-                        if next == ' ' || next == '\t' || next == '\n' || is_kdl_ws(next) {
-                            chars.next();
-                        } else {
-                            break;
-                        }
-                    }
-                    result.push(' ');
-                }
-                Some((j, c)) => {
-                    // Invalid escape char - span the backslash and the invalid character
-                    return Err((
-                        i,
-                        j + c.len_utf8(),
-                        format!("invalid escape character: '{}'", c),
-                    ));
-                }
-                None => {
-                    // Trailing backslash - point just to the backslash
-                    return Err((i, i + 1, "trailing backslash".to_string()));
-                }
-            }
-        } else {
-            result.push(c);
-        }
-    }
-
-    Ok(result)
-}
-
-/// Multi-line quoted string parser: """..."""
-/// The opening """ must be followed by a newline, and the closing """ must be on its own line.
-fn multiline_escaped_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
-    just("\"\"\"").ignore_then(
-        // Capture raw content - one or two quotes are allowed, but not three
-        choice((
-            // One double-quote that isn't followed by two more (not """)
-            just('"').then_ignore(just("\"\"").not().rewind()),
-            // Regular character (not quote)
-            none_of(['"']),
-        ))
-        .repeated()
-        .to_slice()
-        .then_ignore(just("\"\"\""))
-        .validate(|content: &str, extras, emit| {
-            let span = Span::from(extras.span());
-            // Note: span covers content + closing """, so span.end includes the closing delimiter
-            // Content is at span.start to span.end - 3
-            let content_len = content.len();
-
-            // Step 1: Dedent (which includes newline normalization)
-            let (dedented, indent_len) = match dedent_multiline_string(content) {
-                Ok(d) => d,
-                Err(e) => {
-                    let (label, error_span, message) = match e {
-                        MultilineStringError::NoOpeningNewline => (
-                            "must be followed by newline",
-                            span.before_start(3), // Point to opening """
-                            "opening delimiter must be immediately followed by a newline",
-                        ),
-                        MultilineStringError::ClosingNotOnOwnLine => (
-                            "must be on its own line",
-                            // Closing """ is at end of span (last 3 chars)
-                            Span(span.0 + content_len, span.1),
-                            "closing delimiter must be on its own line with only whitespace prefix",
-                        ),
-                        MultilineStringError::InsufficientIndent { offset, length } => (
-                            "insufficient indentation",
-                            // Offset is within content, which starts at span.0
-                            Span(span.0 + offset, span.0 + offset + length),
-                            "line must start with the same whitespace as the closing delimiter",
-                        ),
-                    };
-                    emit.emit(ParseError::Message {
-                        label: Some(label),
-                        span: error_span,
-                        message: message.to_string(),
-                    });
-                    return "".into();
-                }
-            };
-
-            // Step 2: Process escape sequences
-            match process_escapes(&dedented) {
-                Ok(processed) => processed.into(),
-                Err((start, end, msg)) => {
-                    // Map dedented offsets to content offsets:
-                    // The dedented string has indentation stripped from each line.
-                    // To map back to content positions, we need to account for:
-                    // - 1 byte for the leading newline
-                    // - indent_len bytes for the first line's indentation
-                    // - For each newline in the dedented string before the error,
-                    //   add indent_len bytes (the stripped indentation of that line)
-                    let newlines_before_start = dedented[..start].matches('\n').count();
-                    let newlines_before_end = dedented[..end].matches('\n').count();
-                    let content_start = 1 + indent_len + start + newlines_before_start * indent_len;
-                    let content_end = 1 + indent_len + end + newlines_before_end * indent_len;
-                    let error_span = Span(span.0 + content_start, span.0 + content_end);
-                    emit.emit(ParseError::Message {
-                        label: Some("invalid escape sequence"),
-                        span: error_span,
-                        message: msg,
-                    });
-                    "".into()
-                }
-            }
-        })
-        .map_err_with_state(|e: ParseError, span: SimpleSpan, _state| {
-            // Only produce Unclosed error after opening """ was successfully matched
-            let span: Span = span.into();
-            if matches!(
-                &e,
-                ParseError::Unexpected {
-                    found: TokenFormat::Eoi,
-                    ..
-                }
-            ) {
-                // Go back 3 chars for the """ that was already consumed
-                e.merge(ParseError::Unclosed {
-                    label: "multi-line string",
-                    opened_at: span.before_start(3),
-                    opened: TokenFormat::OpenMultiline,
-                    expected_at: span.at_end(),
-                    expected: TokenFormat::CloseMultiline,
-                    found: None.into(),
-                })
-            } else {
-                e
-            }
-        }),
-    )
 }
 
 /// Multi-line raw string parser: #"""..."""#, ##"""..."""##, etc.
@@ -986,8 +746,6 @@ fn multiline_raw_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Erro
                 })
                 .validate(|(content, _): (&str, ()), extras, emit| {
                     let span = Span::from(extras.span());
-                    // Note: span covers content + closing """# (the # count matches opening)
-                    // Content is at span.start to span.end - 3 - hash_count
                     let hash_num = *extras.ctx();
 
                     match dedent_multiline_string(content) {
@@ -1001,13 +759,11 @@ fn multiline_raw_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Erro
                                 ),
                                 MultilineStringError::ClosingNotOnOwnLine => (
                                     "must be on its own line",
-                                    // Point to closing """ (at content_len offset, length 3)
                                     Span(span.1 - 3 - hash_num, span.1),
                                     "closing delimiter must be on its own line with only whitespace prefix",
                                 ),
                                 MultilineStringError::InsufficientIndent { offset, length } => (
                                     "insufficient indentation",
-                                    // Offset is within content, which starts at span.0
                                     Span(span.0 + offset, span.0 + offset + length),
                                     "line must start with the same whitespace as the closing delimiter",
                                 ),
@@ -1017,7 +773,6 @@ fn multiline_raw_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Erro
                                 span: error_span,
                                 message: message.to_string(),
                             });
-                            // Return empty string as error recovery
                             "".into()
                         }
                     }
@@ -1025,10 +780,43 @@ fn multiline_raw_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Erro
         )
 }
 
+// number := keyword-number | hex | octal | binary | decimal
+// Note: keyword_number is handled in literal() alongside keyword(),
+// not here, to avoid polluting expected-token sets in error messages.
 fn number<'src>() -> impl Parser<'src, Input<'src>, Literal, Error> + Clone {
-    radix_number().or(decimal())
+    choice((radix_number(), decimal()))
 }
 
+fn radix_number<'src>() -> impl Parser<'src, Input<'src>, Literal, Error> + Clone {
+    just('-')
+        .or(just('+'))
+        .or_not()
+        .then_ignore(just('0'))
+        .then(choice((
+            // hex := sign? '0x' hex-digit (hex-digit | '_')*
+            just('b')
+                .ignore_then(digit(2).then(integer(2)).to_slice())
+                .map(|s| (Radix::Bin, s)),
+            // octal := sign? '0o' [0-7] [0-7_]*
+            just('o')
+                .ignore_then(digit(8).then(integer(8)).to_slice())
+                .map(|s| (Radix::Oct, s)),
+            // binary := sign? '0b' ('0' | '1') ('0' | '1' | '_')*
+            just('x')
+                .ignore_then(digit(16).then(integer(16)).to_slice())
+                .map(|s| (Radix::Hex, s)),
+        )))
+        .map(|(sign, (radix, value))| {
+            let mut s = String::with_capacity(value.len() + sign.map_or(0, |_| 1));
+            if let Some(c) = sign {
+                s.push(c);
+            }
+            s.extend(value.chars().filter(|&c| c != '_'));
+            Literal::Int(Integer(radix, s.into()))
+        })
+}
+
+// decimal := sign? integer ('.' integer)? exponent?
 fn decimal<'src>() -> impl Parser<'src, Input<'src>, Literal, Error> + Clone {
     just('-')
         .or(just('+'))
@@ -1037,6 +825,7 @@ fn decimal<'src>() -> impl Parser<'src, Input<'src>, Literal, Error> + Clone {
         .then(integer(10))
         .then(just('.').then(digit(10)).then(integer(10)).or_not())
         .then(
+            // exponent := ('e' | 'E') sign? integer
             just('e')
                 .or(just('E'))
                 .then(just('-').or(just('+')).or_not())
@@ -1055,55 +844,60 @@ fn decimal<'src>() -> impl Parser<'src, Input<'src>, Literal, Error> + Clone {
         })
 }
 
+// exponent := ('e' | 'E') sign? integer
+// (handled inline in decimal)
+
+// integer := digit (digit | '_')*
 fn integer<'src>(radix: u32) -> impl Parser<'src, Input<'src>, (), Error> + Clone {
     any::<_, Error>()
         .filter(move |c: &char| c == &'_' || c.is_digit(radix))
         .repeated()
 }
 
+// digit := [0-9]
 fn digit<'src>(radix: u32) -> impl Parser<'src, Input<'src>, char, Error> + Clone {
     any::<_, Error>().filter(move |c: &char| c.is_digit(radix))
 }
 
-fn literal<'src>() -> impl Parser<'src, Input<'src>, Literal, Error> + Clone {
-    // Check for `ident` last, because `ident` first checks for numbers,
-    // and it can confuse keywords with raw strings.
-    choice((keyword(), number(), identifier().map(Literal::String)))
+// keyword := boolean | '#null'
+fn keyword<'src>() -> impl Parser<'src, Input<'src>, Literal, Error> + Clone {
+    choice((
+        just("#null")
+            .map_err(|e: ParseError| e.with_expected_token("#null"))
+            .to(Literal::Null),
+        just("#true")
+            .map_err(|e: ParseError| e.with_expected_token("#true"))
+            .to(Literal::Bool(true)),
+        just("#false")
+            .map_err(|e: ParseError| e.with_expected_token("#false"))
+            .to(Literal::Bool(false)),
+    ))
 }
 
-fn escline<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
-    just('\\')
-        .ignore_then(ws().repeated())
-        .ignore_then(single_line_comment().or(newline()).or(end()))
+// keyword-number := '#inf' | '#-inf' | '#nan'
+fn keyword_number<'src>() -> impl Parser<'src, Input<'src>, Literal, Error> + Clone {
+    choice((
+        just("#nan")
+            .map_err(|e: ParseError| e.with_expected_token("#nan"))
+            .to(Literal::Nan),
+        just("#inf")
+            .map_err(|e: ParseError| e.with_expected_token("#inf"))
+            .to(Literal::Inf),
+        just("#-inf")
+            .map_err(|e: ParseError| e.with_expected_token("#-inf"))
+            .to(Literal::NegInf),
+    ))
 }
 
-fn linespace<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
-    newline().or(ws()).or(single_line_comment())
+// boolean := '#true' | '#false'
+// (handled inline in keyword)
+
+// bom := '\u{FEFF}'
+fn bom<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
+    just('\u{FEFF}').ignored()
 }
 
-fn newline<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
-    just('\r')
-        .or_not()
-        .ignore_then(just('\n'))
-        .or(just('\r')) // Carriage return
-        .or(just('\x0C')) // Form feed
-        .or(just('\x0B')) // Vertical tab
-        .or(just('\u{0085}')) // Next line
-        .or(just('\u{2028}')) // Line separator
-        .or(just('\u{2029}')) // Paragraph separator
-        .ignored()
-        .map_err(|e: ParseError| e.with_expected_kind("newline"))
-}
-
-fn ws<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
-    unicode_space()
-        .repeated()
-        .at_least(1)
-        .ignored()
-        .or(multi_line_comment())
-        .map_err(|e| e.with_expected_kind("whitespace"))
-}
-
+// unicode-space := See Table
 fn unicode_space<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
     any::<_, Error>()
         .filter(|c| {
@@ -1116,6 +910,7 @@ fn unicode_space<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
         .ignored()
 }
 
+// single-line-comment := '//' ^newline* (newline | eof)
 fn single_line_comment<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
     begin_comment('/')
         .then(
@@ -1128,6 +923,8 @@ fn single_line_comment<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Cl
         .ignored()
 }
 
+// multi-line-comment := '/*' commented-block
+// commented-block := '*/' | (multi-line-comment | '*' | '/' | [^*/]+) commented-block
 fn multi_line_comment<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
     recursive::<_, _, Error, _, _>(|comment| {
         choice((
@@ -1164,6 +961,66 @@ fn multi_line_comment<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clo
     })
 }
 
+// slashdash := '/-' line-space*
+fn slashdash<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
+    begin_comment('-').then_ignore(line_space().repeated())
+}
+
+// ws := unicode-space | multi-line-comment
+fn ws<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
+    unicode_space()
+        .repeated()
+        .at_least(1)
+        .ignored()
+        .or(multi_line_comment())
+        .map_err(|e: ParseError| e.with_expected_kind("whitespace"))
+}
+
+// escline := '\\' ws* (single-line-comment | newline | eof)
+fn escline<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
+    just('\\')
+        .ignore_then(ws().repeated())
+        .ignore_then(single_line_comment().or(newline()).or(end()))
+}
+
+// newline := See Table (All Newline White_Space)
+fn newline<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
+    just('\r')
+        .or_not()
+        .ignore_then(just('\n'))
+        .or(just('\r')) // Carriage return
+        .or(just('\x0C')) // Form feed
+        .or(just('\x0B')) // Vertical tab
+        .or(just('\u{0085}')) // Next line
+        .or(just('\u{2028}')) // Line separator
+        .or(just('\u{2029}')) // Paragraph separator
+        .ignored()
+        .map_err(|e: ParseError| e.with_expected_kind("newline"))
+}
+
+// line-space := node-space | newline | single-line-comment
+fn line_space<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
+    newline().or(ws()).or(single_line_comment())
+}
+
+// node-space := ws* escline ws* | ws+
+fn node_space<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
+    ws().or(escline())
+}
+
+// version := '/-' unicode-space* 'kdl-version' unicode-space+ ('1' | '2') unicode-space* newline
+fn version<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
+    just("/-")
+        .then(unicode_space().repeated())
+        .then(just("kdl-version"))
+        .then(unicode_space().repeated().at_least(1))
+        .then(just('1').or(just('2')))
+        .then(unicode_space().repeated())
+        .then(newline())
+        .ignored()
+}
+
+// Helper: begin a comment sequence (// or /- or /*)
 fn begin_comment<'src>(which: char) -> impl Parser<'src, Input<'src>, (), Error> + Clone {
     just('/')
         .map_err(|e: ParseError| e.with_no_expected())
@@ -1184,10 +1041,214 @@ where
     })
 }
 
+// --- Helper functions for multi-line strings ---
+
+/// Normalize newlines: convert all newline variants to LF
+fn normalize_newlines(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\r' => {
+                // CRLF or CR -> LF
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                result.push('\n');
+            }
+            '\x0C' | '\x0B' | '\u{0085}' | '\u{2028}' | '\u{2029}' => {
+                result.push('\n');
+            }
+            _ => result.push(c),
+        }
+    }
+    result
+}
+
+/// Check if a character is a KDL whitespace character
+fn is_kdl_ws(c: char) -> bool {
+    matches!(
+        c,
+        '\t' | ' ' | '\u{00a0}' | '\u{1680}' | '\u{2000}'
+            ..='\u{200A}' | '\u{202F}' | '\u{205F}' | '\u{3000}'
+    )
+}
+
+/// Error type for multi-line string dedentation with location information
+enum MultilineStringError {
+    NoOpeningNewline,
+    ClosingNotOnOwnLine,
+    InsufficientIndent { offset: usize, length: usize },
+}
+
+/// Dedent a multi-line string based on the closing line's whitespace prefix.
+fn dedent_multiline_string(s: &str) -> Result<(String, usize), MultilineStringError> {
+    let normalized = normalize_newlines(s);
+
+    let last_newline_pos = match normalized.rfind('\n') {
+        Some(pos) => pos,
+        None => {
+            return Err(MultilineStringError::NoOpeningNewline);
+        }
+    };
+
+    let indent = &normalized[last_newline_pos + 1..];
+    let indent_len = indent.len();
+
+    if !indent.chars().all(is_kdl_ws) {
+        return Err(MultilineStringError::ClosingNotOnOwnLine);
+    }
+
+    let before_last_newline = &normalized[..last_newline_pos];
+
+    if before_last_newline.is_empty() {
+        return Ok((String::new(), indent_len));
+    }
+
+    if !before_last_newline.starts_with('\n') {
+        return Err(MultilineStringError::NoOpeningNewline);
+    }
+
+    let content = &before_last_newline[1..];
+
+    let mut result = String::with_capacity(content.len());
+    let mut offset_in_content = 0usize;
+    let mut first = true;
+    for line in content.split('\n') {
+        if !first {
+            result.push('\n');
+        }
+        first = false;
+
+        if line.chars().all(is_kdl_ws) {
+            offset_in_content += line.len() + 1;
+            continue;
+        }
+
+        if !line.starts_with(indent) {
+            let ws_prefix_byte_len: usize = line
+                .chars()
+                .take_while(|c| is_kdl_ws(*c))
+                .map(|c| c.len_utf8())
+                .sum();
+            return Err(MultilineStringError::InsufficientIndent {
+                offset: 1 + offset_in_content,
+                length: ws_prefix_byte_len,
+            });
+        }
+        result.push_str(&line[indent.len()..]);
+        offset_in_content += line.len() + 1;
+    }
+
+    Ok((result, indent_len))
+}
+
+/// Process escape sequences in a string
+fn process_escapes(s: &str) -> Result<String, (usize, usize, String)> {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.char_indices().peekable();
+
+    while let Some((i, c)) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some((_, '"')) => result.push('"'),
+                Some((_, '\\')) => result.push('\\'),
+                Some((_, 'b')) => result.push('\u{0008}'),
+                Some((_, 'f')) => result.push('\u{000C}'),
+                Some((_, 'n')) => result.push('\n'),
+                Some((_, 'r')) => result.push('\r'),
+                Some((_, 't')) => result.push('\t'),
+                Some((_, 's')) => result.push(' '),
+                Some((_, 'u')) => {
+                    'check_brace: {
+                        let char_len = match chars.next() {
+                            Some((_, '{')) => {
+                                break 'check_brace;
+                            }
+                            Some((_, c)) => c.len_utf8(),
+                            None => 0,
+                        };
+                        return Err((i, i + 2 + char_len, "expected '{' after \\u".to_string()));
+                    }
+                    let mut hex = String::new();
+                    let close_pos = loop {
+                        match chars.next() {
+                            Some((j, '}')) => {
+                                break j + 1;
+                            }
+                            Some((j, c)) if c.is_ascii_hexdigit() => {
+                                if hex.len() >= 6 {
+                                    return Err((
+                                        i,
+                                        j + c.len_utf8(),
+                                        "unicode escape too long".to_string(),
+                                    ));
+                                }
+                                hex.push(c);
+                            }
+                            Some((j, c)) => {
+                                return Err((
+                                    i,
+                                    j + c.len_utf8(),
+                                    format!("invalid character '{}' in unicode escape", c),
+                                ));
+                            }
+                            None => {
+                                return Err((i, s.len(), "unclosed unicode escape".to_string()));
+                            }
+                        }
+                    };
+                    if hex.is_empty() {
+                        return Err((i, close_pos, "empty unicode escape".to_string()));
+                    }
+                    let code = u32::from_str_radix(&hex, 16).unwrap();
+                    match char::try_from(code) {
+                        Ok(c) => result.push(c),
+                        Err(_) => {
+                            return Err((
+                                i,
+                                close_pos,
+                                format!("invalid unicode code point: {}", code),
+                            ));
+                        }
+                    }
+                }
+                Some((_, c)) if c == ' ' || c == '\t' || c == '\n' || is_kdl_ws(c) => {
+                    while let Some(&(_, next)) = chars.peek() {
+                        if next == ' ' || next == '\t' || next == '\n' || is_kdl_ws(next) {
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    result.push(' ');
+                }
+                Some((j, c)) => {
+                    return Err((
+                        i,
+                        j + c.len_utf8(),
+                        format!("invalid escape character: '{}'", c),
+                    ));
+                }
+                None => {
+                    return Err((i, i + 1, "trailing backslash".to_string()));
+                }
+            }
+        } else {
+            result.push(c);
+        }
+    }
+
+    Ok(result)
+}
+
 #[cfg(test)]
 mod test {
     use super::{Error, Input};
-    use super::{identifier, literal, multi_line_comment, single_line_comment, string, r#type, ws};
+    use super::{
+        identifier_string, keyword, keyword_number, multi_line_comment, single_line_comment,
+        string, r#type, ws,
+    };
     use super::{nodes, number};
     use crate::ast::{Decimal, Integer, Literal, Radix, TypeName};
     use crate::errors::Error as MietteError;
@@ -1700,8 +1761,6 @@ mod test {
 
     #[test]
     fn parse_multiline_str_err_no_opening_newline() {
-        // Missing newline after opening delimiter: """hello"""
-        // Points to opening """ (offset 0, length 3)
         err_eq!(
             parse(string(), "\"\"\"hello\"\"\""),
             r#"{
@@ -1724,8 +1783,6 @@ mod test {
 
     #[test]
     fn parse_multiline_raw_str_err_no_opening_newline() {
-        // Missing newline after opening delimiter: ##"""hello"""##
-        // Points to opening ##""" (offset 0, length 5)
         err_eq!(
             parse(string(), "##\"\"\"hello\"\"\"##"),
             r#"{
@@ -1748,8 +1805,6 @@ mod test {
 
     #[test]
     fn parse_multiline_str_err_closing_not_on_own_line() {
-        // Closing delimiter not on its own line: """\nhello"""
-        // Points to closing """ (offset 9, length 3)
         err_eq!(
             parse(string(), "\"\"\"\nhello\"\"\""),
             r#"{
@@ -1772,8 +1827,6 @@ mod test {
 
     #[test]
     fn parse_multiline_raw_str_err_closing_not_on_own_line() {
-        // Closing delimiter not on its own line: ##"""\nhello"""##
-        // Points to closing """## (offset 11, length 5)
         err_eq!(
             parse(string(), "##\"\"\"\nhello\"\"\"##"),
             r#"{
@@ -1796,9 +1849,6 @@ mod test {
 
     #[test]
     fn parse_multiline_str_err_insufficient_indent() {
-        // Insufficient indentation with non-ASCII whitespace: """\n    hello\n\u{00a0}\u{00a0}world\n    """
-        // Uses two non-breaking spaces (\u{00a0}, 2 bytes each in UTF-8) as the bad indentation
-        // Points to the whitespace prefix (offset 14, length 4 bytes)
         err_eq!(
             parse(
                 string(),
@@ -1824,8 +1874,6 @@ mod test {
 
     #[test]
     fn triple_quote_not_single_line() {
-        // """ should not be parsed as a single-line string
-        // It is treated as a multi-line string opening, which then fails due to missing structure
         err_eq!(
             parse(string(), "\"\"\""),
             r#"{
@@ -1850,9 +1898,6 @@ mod test {
 
     #[test]
     fn hash_triple_quote_is_multiline() {
-        // #"""# should be treated as invalid multi-line raw string, not as single-line with content ""
-        // The old behavior was: #"""# = single-line raw string with content """
-        // The new behavior is: #"""...."""# is multi-line, so #"""# without proper structure is an error
         err_eq!(
             parse(string(), "#\"\"\"#"),
             r##"{
@@ -1877,7 +1922,6 @@ mod test {
 
     #[test]
     fn parse_multiline_str_err_expected_brace_after_u() {
-        // \u without { in multi-line string - points to \uA (the wrong char after \u)
         err_eq!(
             parse(string(), "\"\"\"\n\\uABCD\n\"\"\""),
             r#"{
@@ -1900,7 +1944,6 @@ mod test {
 
     #[test]
     fn parse_multiline_str_err_expected_brace_after_u_eoi() {
-        // \u without { in multi-line string - points to \uA (the wrong char after \u)
         err_eq!(
             parse(string(), "\"\"\"\n\\u\n\"\"\""),
             r#"{
@@ -1923,7 +1966,6 @@ mod test {
 
     #[test]
     fn parse_multiline_str_err_unicode_escape_too_long() {
-        // More than 6 hex digits in unicode escape - spans the whole escape including excess digit
         err_eq!(
             parse(string(), "\"\"\"\n\\u{1234567}\n\"\"\""),
             r#"{
@@ -1946,7 +1988,6 @@ mod test {
 
     #[test]
     fn parse_multiline_str_err_invalid_char_in_unicode_escape() {
-        // Invalid character 'g' in unicode escape - spans up to and including the invalid char
         err_eq!(
             parse(string(), "\"\"\"\n\\u{12gh}\n\"\"\""),
             r#"{
@@ -1969,7 +2010,6 @@ mod test {
 
     #[test]
     fn parse_multiline_str_err_unclosed_unicode_escape() {
-        // Unclosed unicode escape - \u{1234 without closing }
         err_eq!(
             parse(string(), "\"\"\"\n\\u{1234\n\"\"\""),
             r#"{
@@ -1992,7 +2032,6 @@ mod test {
 
     #[test]
     fn parse_multiline_str_err_empty_unicode_escape() {
-        // Empty unicode escape \u{} - spans the whole escape
         err_eq!(
             parse(string(), "\"\"\"\n\\u{}\n\"\"\""),
             r#"{
@@ -2015,7 +2054,6 @@ mod test {
 
     #[test]
     fn parse_multiline_str_err_invalid_unicode_code_point() {
-        // Invalid unicode code point (surrogate) - spans the whole escape
         err_eq!(
             parse(string(), "\"\"\"\n\\u{D800}\n\"\"\""),
             r#"{
@@ -2038,7 +2076,6 @@ mod test {
 
     #[test]
     fn parse_multiline_str_err_invalid_escape_char() {
-        // Invalid escape character \x - spans the backslash and invalid char
         err_eq!(
             parse(string(), "\"\"\"\n\\x01\n\"\"\""),
             r#"{
@@ -2061,7 +2098,6 @@ mod test {
 
     #[test]
     fn parse_multiline_str_err_trailing_backslash() {
-        // Trailing backslash at end of content - spans just the backslash
         err_eq!(
             parse(string(), "\"\"\"\nhello\\\n\"\"\""),
             r#"{
@@ -2084,10 +2120,6 @@ mod test {
 
     #[test]
     fn parse_multiline_str_err_second_line() {
-        // Error on second line of multi-line string
-        // Input: """\n    line1\n    \x01\n    """
-        // The \x is at source offset 18-19 (after """, newline, indent, line1, newline, indent)
-        // With correct span calculation, offset should be 18, length 2
         err_eq!(
             parse(string(), "\"\"\"\n    line1\n    \\x01\n    \"\"\""),
             r#"{
@@ -2110,26 +2142,6 @@ mod test {
 
     #[test]
     fn parse_multiline_str_err_non_ascii_indent() {
-        // Test with non-ASCII whitespace in indentation
-        // Both content line and closing line use: ASCII space + non-breaking space (U+00A0)
-        // This verifies byte-based indent_len works correctly with multi-byte whitespace
-        //
-        // Byte layout:
-        // - bytes 0-2: """
-        // - byte 3: \n
-        // - byte 4: ASCII space
-        // - bytes 5-6: U+00A0 (NBSP, 2 bytes in UTF-8)
-        // - bytes 7-11: hello
-        // - byte 12: \
-        // - byte 13: x
-        // - bytes 14-15: 01
-        // - byte 16: \n
-        // - byte 17: ASCII space
-        // - bytes 18-19: U+00A0
-        // - bytes 20-22: """
-        //
-        // indent_len = 3 bytes (1 space + 2 for NBSP)
-        // The \x escape error should be at source offset 12, length 2
         err_eq!(
             parse(string(), "\"\"\"\n \u{00A0}hello\\x01\n \u{00A0}\"\"\""),
             r#"{
@@ -2152,39 +2164,45 @@ mod test {
 
     #[test]
     fn parse_ident() {
-        assert_eq!(&*parse(identifier(), "abcdef").unwrap(), "abcdef");
-        assert_eq!(&*parse(identifier(), "xx_cd$yy").unwrap(), "xx_cd$yy");
-        assert_eq!(&*parse(identifier(), "-").unwrap(), "-");
-        assert_eq!(&*parse(identifier(), "--hello").unwrap(), "--hello");
-        assert_eq!(&*parse(identifier(), "--hello1234").unwrap(), "--hello1234");
-        assert_eq!(&*parse(identifier(), "--1").unwrap(), "--1");
-        assert_eq!(&*parse(identifier(), "++1").unwrap(), "++1");
-        assert_eq!(&*parse(identifier(), "-hello").unwrap(), "-hello");
-        assert_eq!(&*parse(identifier(), "+hello").unwrap(), "+hello");
-        assert_eq!(&*parse(identifier(), "-A").unwrap(), "-A");
-        assert_eq!(&*parse(identifier(), "+b").unwrap(), "+b");
+        assert_eq!(&*parse(identifier_string(), "abcdef").unwrap(), "abcdef");
         assert_eq!(
-            &*parse(identifier().then_ignore(ws()), "adef   ").unwrap(),
+            &*parse(identifier_string(), "xx_cd$yy").unwrap(),
+            "xx_cd$yy"
+        );
+        assert_eq!(&*parse(identifier_string(), "-").unwrap(), "-");
+        assert_eq!(&*parse(identifier_string(), "--hello").unwrap(), "--hello");
+        assert_eq!(
+            &*parse(identifier_string(), "--hello1234").unwrap(),
+            "--hello1234"
+        );
+        assert_eq!(&*parse(identifier_string(), "--1").unwrap(), "--1");
+        assert_eq!(&*parse(identifier_string(), "++1").unwrap(), "++1");
+        assert_eq!(&*parse(identifier_string(), "-hello").unwrap(), "-hello");
+        assert_eq!(&*parse(identifier_string(), "+hello").unwrap(), "+hello");
+        assert_eq!(&*parse(identifier_string(), "-A").unwrap(), "-A");
+        assert_eq!(&*parse(identifier_string(), "+b").unwrap(), "+b");
+        assert_eq!(
+            &*parse(identifier_string().then_ignore(ws()), "adef   ").unwrap(),
             "adef"
         );
         assert_eq!(
-            &*parse(identifier().then_ignore(ws()), "a123@   ").unwrap(),
+            &*parse(identifier_string().then_ignore(ws()), "a123@   ").unwrap(),
             "a123@"
         );
-        parse(identifier(), "1abc").unwrap_err();
-        parse(identifier(), "-1").unwrap_err();
-        parse(identifier(), "-1test").unwrap_err();
-        parse(identifier(), "+1").unwrap_err();
+        parse(identifier_string(), "1abc").unwrap_err();
+        parse(identifier_string(), "-1").unwrap_err();
+        parse(identifier_string(), "-1test").unwrap_err();
+        parse(identifier_string(), "+1").unwrap_err();
     }
 
     #[test]
     fn parse_literal() {
-        assert_eq!(parse(literal(), "#true").unwrap(), Literal::Bool(true));
-        assert_eq!(parse(literal(), "#false").unwrap(), Literal::Bool(false));
-        assert_eq!(parse(literal(), "#null").unwrap(), Literal::Null);
-        assert_eq!(parse(literal(), "#nan").unwrap(), Literal::Nan);
-        assert_eq!(parse(literal(), "#inf").unwrap(), Literal::Inf);
-        assert_eq!(parse(literal(), "#-inf").unwrap(), Literal::NegInf);
+        assert_eq!(parse(keyword(), "#true").unwrap(), Literal::Bool(true));
+        assert_eq!(parse(keyword(), "#false").unwrap(), Literal::Bool(false));
+        assert_eq!(parse(keyword(), "#null").unwrap(), Literal::Null);
+        assert_eq!(parse(keyword_number(), "#nan").unwrap(), Literal::Nan);
+        assert_eq!(parse(keyword_number(), "#inf").unwrap(), Literal::Inf);
+        assert_eq!(parse(keyword_number(), "#-inf").unwrap(), Literal::NegInf);
     }
 
     #[test]
