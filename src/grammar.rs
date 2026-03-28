@@ -255,6 +255,7 @@ fn value<'src>() -> impl Parser<'src, Input<'src>, Value, Error> + Clone {
     }))
 }
 
+// Helper: parses a typed value (type followed by literal).
 fn type_name_value<'src>() -> impl Parser<'src, Input<'src>, Value, Error> + Clone {
     spanned(r#type().then_ignore(node_space().repeated()))
         .then(spanned(literal()))
@@ -274,8 +275,9 @@ fn r#type<'src>() -> impl Parser<'src, Input<'src>, TypeName, Error> + Clone {
         .map(TypeName::from_string)
 }
 
-// An identifier is a string used as node name or type name.
-// It can be a bare identifier, a quoted/raw string, or a number (which is an error).
+// Helper: parses a string used as node name or type name.
+// Not a direct grammar production — the grammar uses `string` in base-node and type,
+// but this also handles numbers-as-identifiers with error reporting.
 fn identifier<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
     choice((
         // match -123 so `-` will not be treated as an ident by backtracking
@@ -298,7 +300,8 @@ fn identifier<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone
     })
 }
 
-// literal := keyword | keyword-number | number | string
+// Helper: parses any literal value (keyword | keyword-number | number | string).
+// Not a direct grammar production — the grammar uses `value` which combines type + literal.
 fn literal<'src>() -> impl Parser<'src, Input<'src>, Literal, Error> + Clone {
     // Check for `ident` last, because `ident` first checks for numbers,
     // and it can confuse keywords with raw strings.
@@ -314,14 +317,14 @@ fn literal<'src>() -> impl Parser<'src, Input<'src>, Literal, Error> + Clone {
 fn string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
     // Beware the order: multi-line variants must be tried before single-line variants
     // to ensure #""" is parsed as multi-line raw string, not single-line with content "".
-    choice((multiline_raw_string(), raw_string(), quoted_string()))
+    choice((multi_line_raw_string(), raw_string(), quoted_string()))
 }
 
 // quoted-string :=
 //     '"' single-line-string-body '"' |
 //     '"""' newline multi-line-string-body? newline ws* '"""'
 fn quoted_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
-    choice((multiline_escaped_string(), escaped_string()))
+    choice((multi_line_quoted_string(), single_line_quoted_string()))
 }
 
 // identifier-string :=
@@ -488,8 +491,8 @@ fn id_sans_sign_dig_point<'src>() -> impl Parser<'src, Input<'src>, char, Error>
         .map_err(|e: ParseError| e.with_expected_kind("letter"))
 }
 
-// Single-line escaped string: '"' single-line-string-body '"'
-fn escaped_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
+// Single-line quoted string: '"' single-line-string-body '"'
+fn single_line_quoted_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
     // Single quote only - reject """ which is multi-line syntax
     just('"')
         .then_ignore(just("\"\"").not().rewind())
@@ -580,8 +583,8 @@ fn escape<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
         ))
 }
 
-/// Multi-line quoted string parser: """..."""
-fn multiline_escaped_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
+// Multi-line quoted string: '"""' newline ... '"""'
+fn multi_line_quoted_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
     just("\"\"\"").ignore_then(
         // Capture raw content - one or two quotes are allowed, but not three
         choice((
@@ -709,8 +712,8 @@ fn raw_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone
         .map(|text| text.0.into())
 }
 
-/// Multi-line raw string parser: #"""..."""#, ##"""..."""##, etc.
-fn multiline_raw_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
+// Multi-line raw string: #"""..."""#, ##"""..."""##, etc.
+fn multi_line_raw_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
     let matching_hashes = just('#')
         .repeated()
         .configure(|cfg, hash_num| cfg.exactly(*hash_num));
@@ -787,16 +790,17 @@ fn multiline_raw_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Erro
 // Note: keyword_number is handled in literal() alongside keyword(),
 // not here, to avoid polluting expected-token sets in error messages.
 fn number<'src>() -> impl Parser<'src, Input<'src>, Literal, Error> + Clone {
-    choice((radix_number(), decimal()))
+    choice((hex_or_octal_or_binary(), decimal()))
 }
 
-fn radix_number<'src>() -> impl Parser<'src, Input<'src>, Literal, Error> + Clone {
+// hex | octal | binary — these share the sign? '0' prefix
+fn hex_or_octal_or_binary<'src>() -> impl Parser<'src, Input<'src>, Literal, Error> + Clone {
     just('-')
         .or(just('+'))
         .or_not()
         .then_ignore(just('0'))
         .then(choice((
-            // hex := sign? '0x' hex-digit (hex-digit | '_')*
+            // binary := sign? '0b' ('0' | '1') ('0' | '1' | '_')*
             just('b')
                 .ignore_then(digit(2).then(integer(2)).to_slice())
                 .map(|s| (Radix::Bin, s)),
@@ -804,7 +808,7 @@ fn radix_number<'src>() -> impl Parser<'src, Input<'src>, Literal, Error> + Clon
             just('o')
                 .ignore_then(digit(8).then(integer(8)).to_slice())
                 .map(|s| (Radix::Oct, s)),
-            // binary := sign? '0b' ('0' | '1') ('0' | '1' | '_')*
+            // hex := sign? '0x' hex-digit (hex-digit | '_')*
             just('x')
                 .ignore_then(digit(16).then(integer(16)).to_slice())
                 .map(|s| (Radix::Hex, s)),
@@ -2734,7 +2738,7 @@ mod test {
     }
 
     #[test]
-    fn parse_radix_number() {
+    fn parse_hex_or_octal_or_binary() {
         assert_eq!(
             parse(number(), "0x12").unwrap(),
             Literal::Int(Integer(Radix::Hex, "12".into()))
