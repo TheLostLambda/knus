@@ -895,10 +895,11 @@ struct ResourceRecord {
     r#type: RecordType,
 }
 
+// This struct can act as root document because it has no arguments or properties
 #[derive(knus_derive::Decode, Debug, PartialEq)]
-struct ResourceRecordOnlyChildren {
-    #[knus(children(name = "rr"))]
-    resource_records: Vec<ResourceRecord>,
+struct ResourceRecordDocument {
+    #[knus(child, unwrap(argument))]
+    name: String,
     #[knus(child(ignore_name))]
     r#type: RecordType,
 }
@@ -949,22 +950,16 @@ fn parse_child_enum() {
 }
 
 #[test]
-fn parse_child_enum_no_args() {
+fn parse_child_enum_root() {
     assert_eq!(
-        parse_doc::<ResourceRecordOnlyChildren>(
-            r#"rr "example.com" { a "192.0.2.1"; }
-            a "192.0.2.1""#
-        ),
-        ResourceRecordOnlyChildren {
-            resource_records: vec![ResourceRecord {
-                name: "example.com".into(),
-                r#type: RecordType::A("192.0.2.1".into()),
-            }],
+        parse_doc::<ResourceRecordDocument>(r#"a "192.0.2.1"; name "example.com""#),
+        ResourceRecordDocument {
+            name: "example.com".into(),
             r#type: RecordType::A("192.0.2.1".into()),
         }
     );
     assert_eq!(
-        parse_doc_err::<ResourceRecordOnlyChildren>("a \"192.0.2.1\"\na \"192.0.2.1\""),
+        parse_doc_err::<ResourceRecordDocument>("a \"192.0.2.1\"\na \"192.0.2.1\""),
         "unexpected node; single child expected"
     );
 }
@@ -994,6 +989,44 @@ fn parse_dns_config() {
                     r#type: RecordType::Aaaa("2001:db8::1".into()),
                 },
             ],
+        }
+    );
+}
+
+#[derive(knus_derive::Decode, Debug, PartialEq)]
+struct Plugin {
+    #[knus(node_name)]
+    name: String,
+    #[knus(argument)]
+    version: String,
+}
+
+#[derive(knus_derive::Decode, Debug, PartialEq)]
+struct OnlyOnePlugin {
+    #[knus(argument)]
+    flag: bool,
+    #[knus(child(ignore_name))]
+    plugin: Plugin,
+}
+
+#[derive(knus_derive::Decode, Debug, PartialEq)]
+struct PluginDocument {
+    #[knus(child)]
+    one_plugin: OnlyOnePlugin,
+}
+
+#[test]
+fn parse_one_plugin() {
+    assert_eq!(
+        parse_doc::<PluginDocument>(r#"one-plugin #true {example "3.1.0"}"#),
+        PluginDocument {
+            one_plugin: OnlyOnePlugin {
+                flag: true,
+                plugin: Plugin {
+                    name: "example".into(),
+                    version: "3.1.0".into(),
+                }
+            }
         }
     );
 }
