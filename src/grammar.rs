@@ -325,14 +325,8 @@ fn r#type<'src>() -> impl Parser<'src, Input<'src>, TypeName, Error> + Clone {
 
 // string := identifier-string | quoted-string | raw-string
 fn string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
-    // Beware the order: multi-line variants must be tried before single-line variants
-    // to ensure #""" is parsed as multi-line raw string, not single-line with content "".
-    choice((
-        identifier_string(),
-        multi_line_raw_string(),
-        raw_string(),
-        quoted_string(),
-    ))
+    // raw_string before quoted_string so chumsky's error recovery works correctly
+    choice((identifier_string(), raw_string(), quoted_string()))
 }
 
 // quoted-string :=
@@ -687,16 +681,89 @@ fn multi_line_quoted_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, 
 
 // raw-string := '#' raw-string-quotes '#' | '#' raw-string '#'
 fn raw_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
-    let matching_hashes = just('#')
-        .repeated()
-        .configure(|cfg, hash_num| cfg.exactly(*hash_num));
     just('#')
         .repeated()
         .at_least(1)
         .count()
-        // Single quote only; reject """ which is multi-line syntax
-        .then_ignore(just('"').then_ignore(just("\"\"").not().rewind()))
-        .ignore_with_ctx(
+        .ignore_with_ctx(raw_string_quotes())
+}
+
+// raw-string-quotes :=
+//     '"' single-line-raw-string-body '"' |
+//     '"""' newline (multi-line-raw-string-body newline)? unicode-space* '"""'
+fn raw_string_quotes<'src>(
+) -> impl Parser<'src, Input<'src>, Box<str>, extra::Full<ParseError, (), usize>> + Clone {
+    let matching_hashes = just('#')
+        .repeated()
+        .configure(|cfg, hash_num| cfg.exactly(*hash_num));
+
+    // Multi-line: """...""" (must be tried before single-line since """ starts with ")
+    let multi_line = just("\"\"\"").ignore_then(
+        any()
+            .and_is(just("\"\"\"").then(matching_hashes).not())
+            .repeated()
+            .to_slice()
+            .then(just("\"\"\"").ignore_then(matching_hashes.ignored()))
+            .map_err_with(move |e: ParseError, extras| {
+                let hash_num = *extras.ctx();
+                if matches!(
+                    &e,
+                    ParseError::Unexpected {
+                        found: TokenFormat::Eoi,
+                        ..
+                    }
+                ) {
+                    e.merge(ParseError::Unclosed {
+                        label: "multi-line raw string",
+                        opened_at: Span::from(extras.span()).before_start(hash_num + 4),
+                        opened: TokenFormat::OpenMultilineRaw(hash_num),
+                        expected_at: Span::from(extras.span()).at_end(),
+                        expected: TokenFormat::CloseMultilineRaw(hash_num),
+                        found: None.into(),
+                    })
+                } else {
+                    e
+                }
+            })
+            .validate(|(content, _): (&str, ()), extras, emit| {
+                let span = Span::from(extras.span());
+                let hash_num = *extras.ctx();
+
+                match dedent_multiline_string(content) {
+                    Ok((dedented, _indent_len)) => dedented.into(),
+                    Err(e) => {
+                        let (label, error_span, message) = match e {
+                            MultilineStringError::NoOpeningNewline => (
+                                "must be followed by newline",
+                                span.before_start(hash_num + 3),
+                                "opening delimiter must be immediately followed by a newline",
+                            ),
+                            MultilineStringError::ClosingNotOnOwnLine => (
+                                "must be on its own line",
+                                Span(span.1 - 3 - hash_num, span.1),
+                                "closing delimiter must be on its own line with only whitespace prefix",
+                            ),
+                            MultilineStringError::InsufficientIndent { offset, length } => (
+                                "insufficient indentation",
+                                Span(span.0 + offset, span.0 + offset + length),
+                                "line must start with the same whitespace as the closing delimiter",
+                            ),
+                        };
+                        emit.emit(ParseError::Message {
+                            label: Some(label),
+                            span: error_span,
+                            message: message.to_string(),
+                        });
+                        "".into()
+                    }
+                }
+            }),
+    );
+
+    // Single-line: "..."
+    let single_line = just('"')
+        .then_ignore(just("\"\"").not().rewind())
+        .ignore_then(
             any()
                 .and_is(just('"').then(matching_hashes).not())
                 .repeated()
@@ -724,81 +791,9 @@ fn raw_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone
                     }
                 }),
         )
-        .map(|text| text.0.into())
-}
+        .map(|(text, _): (&str, ())| -> Box<str> { text.into() });
 
-// Multi-line raw string: #"""..."""#, ##"""..."""##, etc.
-fn multi_line_raw_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
-    let matching_hashes = just('#')
-        .repeated()
-        .configure(|cfg, hash_num| cfg.exactly(*hash_num));
-
-    just('#')
-        .repeated()
-        .at_least(1)
-        .count()
-        .then_ignore(just("\"\"\""))
-        .ignore_with_ctx(
-            any()
-                .and_is(just("\"\"\"").then(matching_hashes).not())
-                .repeated()
-                .to_slice()
-                .then(just("\"\"\"").ignore_then(matching_hashes.ignored()))
-                .map_err_with(move |e: ParseError, extras| {
-                    let hash_num = *extras.ctx();
-                    if matches!(
-                        &e,
-                        ParseError::Unexpected {
-                            found: TokenFormat::Eoi,
-                            ..
-                        }
-                    ) {
-                        e.merge(ParseError::Unclosed {
-                            label: "multi-line raw string",
-                            opened_at: Span::from(extras.span()).before_start(hash_num + 4),
-                            opened: TokenFormat::OpenMultilineRaw(hash_num),
-                            expected_at: Span::from(extras.span()).at_end(),
-                            expected: TokenFormat::CloseMultilineRaw(hash_num),
-                            found: None.into(),
-                        })
-                    } else {
-                        e
-                    }
-                })
-                .validate(|(content, _): (&str, ()), extras, emit| {
-                    let span = Span::from(extras.span());
-                    let hash_num = *extras.ctx();
-
-                    match dedent_multiline_string(content) {
-                        Ok((dedented, _indent_len)) => dedented.into(),
-                        Err(e) => {
-                            let (label, error_span, message) = match e {
-                                MultilineStringError::NoOpeningNewline => (
-                                    "must be followed by newline",
-                                    span.before_start(hash_num + 3),
-                                    "opening delimiter must be immediately followed by a newline",
-                                ),
-                                MultilineStringError::ClosingNotOnOwnLine => (
-                                    "must be on its own line",
-                                    Span(span.1 - 3 - hash_num, span.1),
-                                    "closing delimiter must be on its own line with only whitespace prefix",
-                                ),
-                                MultilineStringError::InsufficientIndent { offset, length } => (
-                                    "insufficient indentation",
-                                    Span(span.0 + offset, span.0 + offset + length),
-                                    "line must start with the same whitespace as the closing delimiter",
-                                ),
-                            };
-                            emit.emit(ParseError::Message {
-                                label: Some(label),
-                                span: error_span,
-                                message: message.to_string(),
-                            });
-                            "".into()
-                        }
-                    }
-                }),
-        )
+    choice((multi_line, single_line))
 }
 
 // number := keyword-number | hex | octal | binary | decimal
