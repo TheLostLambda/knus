@@ -83,7 +83,7 @@ fn nodes<'src>() -> impl Parser<'src, Input<'src>, Vec<SpannedNode>, Error> + Cl
                 node_space()
                     .repeated()
                     .at_least(1)
-                    .ignore_then(node_prop_or_arg())
+                    .ignore_then(maybe_slashdash_node_prop_or_arg())
                     .repeated()
                     .collect::<Vec<PropOrArg>>(),
             )
@@ -159,16 +159,20 @@ enum PropOrArg {
     Ignore,
 }
 
-// node-prop-or-arg := prop | value
-fn node_prop_or_arg<'src>() -> impl Parser<'src, Input<'src>, PropOrArg, Error> + Clone {
+// (node-space | slashdash) node-prop-or-arg
+// Handles the slashdash alternative from base-node, returning PropOrArg::Ignore
+// for slashdashed entries.
+fn maybe_slashdash_node_prop_or_arg<'src>() -> impl Parser<'src, Input<'src>, PropOrArg, Error> + Clone
+{
     slashdash()
         .ignore_then(line_space().repeated())
-        .ignore_then(node_prop_or_arg_inner())
+        .ignore_then(node_prop_or_arg())
         .to(PropOrArg::Ignore)
-        .or(node_prop_or_arg_inner())
+        .or(node_prop_or_arg())
 }
 
-fn node_prop_or_arg_inner<'src>() -> impl Parser<'src, Input<'src>, PropOrArg, Error> + Clone {
+// node-prop-or-arg := prop | value
+fn node_prop_or_arg<'src>() -> impl Parser<'src, Input<'src>, PropOrArg, Error> + Clone {
     use PropOrArg::*;
 
     // prop := string node-space* '=' node-space* value
@@ -435,69 +439,57 @@ fn sign<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
 //     - disallowed-literal-code-points
 fn identifier_char<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
     any::<_, Error>()
-        .filter(|c| {
-            !matches!(c,
-                '\u{0000}'..='\u{0021}' |
-                '\\'|'/'|'('|')'|'{'|'}'|';'|'['|']'|'='|'"'|'#' |
-                // whitespace, excluding 0x20
-                '\u{00a0}' | '\u{1680}' |
-                '\u{2000}'..='\u{200A}' |
-                '\u{202F}' | '\u{205F}' | '\u{3000}' | '\u{FEFF}' |
-                // newline (excluding <= 0x20)
-                '\u{0085}' | '\u{2028}' | '\u{2029}'
-            )
-        })
+        .filter(is_identifier_char)
         .map_err(|e: ParseError| e.with_expected_kind("letter"))
+}
+
+fn is_identifier_char(c: &char) -> bool {
+    !matches!(c,
+        // disallowed-literal-code-points (U+0000-0008, U+000E-001F)
+        // + unicode-space (U+0009 tab, U+0020 space)
+        // + newline (U+000A-000D)
+        '\u{0000}'..='\u{0020}' |
+        // [\\/(){};\[\]"#=]
+        '\\'|'/'|'('|')'|'{'|'}'|';'|'['|']'|'='|'"'|'#' |
+        // disallowed-literal-code-points: U+007F (Delete)
+        '\u{007F}' |
+        // newline: U+0085 (NEL)
+        '\u{0085}' |
+        // unicode-space
+        '\u{00a0}' | '\u{1680}' |
+        '\u{2000}'..='\u{200A}' |
+        // disallowed-literal-code-points: direction control characters
+        '\u{200E}'..='\u{200F}' |
+        '\u{202A}'..='\u{202E}' |
+        // unicode-space
+        '\u{202F}' | '\u{205F}' |
+        // disallowed-literal-code-points: direction control characters
+        '\u{2066}'..='\u{2069}' |
+        // newline: U+2028 (LS), U+2029 (PS)
+        '\u{2028}' | '\u{2029}' |
+        // unicode-space + disallowed-literal-code-points: U+FEFF (BOM)
+        '\u{3000}' | '\u{FEFF}'
+    )
 }
 
 // (identifier-char - digit)
 fn id_sans_dig<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
     any::<_, Error>()
-        .filter(|c| {
-            !matches!(c,
-                '0'..='9' |
-                '\u{0000}'..='\u{0020}' |
-                '\\'|'/'|'('|')'|'{'|'}'|';'|'['|']'|'='|'"'|'#' |
-                '\u{00a0}' | '\u{1680}' |
-                '\u{2000}'..='\u{200A}' |
-                '\u{202F}' | '\u{205F}' | '\u{3000}' | '\u{FEFF}' |
-                '\u{0085}' | '\u{2028}' | '\u{2029}'
-            )
-        })
+        .filter(|c| is_identifier_char(c) && !c.is_ascii_digit())
         .map_err(|e: ParseError| e.with_expected_kind("letter"))
 }
 
 // (identifier-char - digit - '.')
 fn id_sans_dig_point<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
     any::<_, Error>()
-        .filter(|c| {
-            !matches!(c,
-                '0'..='9' | '.' |
-                '\u{0000}'..='\u{0020}' |
-                '\\'|'/'|'('|')'|'{'|'}'|';'|'['|']'|'='|'"'|'#' |
-                '\u{00a0}' | '\u{1680}' |
-                '\u{2000}'..='\u{200A}' |
-                '\u{202F}' | '\u{205F}' | '\u{3000}' | '\u{FEFF}' |
-                '\u{0085}' | '\u{2028}' | '\u{2029}'
-            )
-        })
+        .filter(|c| is_identifier_char(c) && !c.is_ascii_digit() && *c != '.')
         .map_err(|e: ParseError| e.with_expected_kind("letter"))
 }
 
 // (identifier-char - digit - sign - '.')
 fn id_sans_sign_dig_point<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
     any::<_, Error>()
-        .filter(|c| {
-            !matches!(c,
-                '-'| '+' | '0'..='9' |
-                '\u{0000}'..='\u{0020}' |
-                '\\'|'/'|'('|')'|'{'|'}'|';'|'['|']'|'='|'"'|'#' |
-                '\u{00a0}' | '\u{1680}' |
-                '\u{2000}'..='\u{200A}' |
-                '\u{202F}' | '\u{205F}' | '\u{3000}' | '\u{FEFF}' |
-                '\u{0085}' | '\u{2028}' | '\u{2029}'
-            )
-        })
+        .filter(|c| is_identifier_char(c) && !c.is_ascii_digit() && !matches!(c, '.' | '+' | '-'))
         .map_err(|e: ParseError| e.with_expected_kind("letter"))
 }
 
