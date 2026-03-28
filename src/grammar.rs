@@ -314,12 +314,14 @@ fn literal<'src>() -> impl Parser<'src, Input<'src>, Literal, Error> + Clone {
 fn string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
     // Beware the order: multi-line variants must be tried before single-line variants
     // to ensure #""" is parsed as multi-line raw string, not single-line with content "".
-    choice((
-        multiline_raw_string(),
-        raw_string(),
-        multiline_escaped_string(),
-        escaped_string(),
-    ))
+    choice((multiline_raw_string(), raw_string(), quoted_string()))
+}
+
+// quoted-string :=
+//     '"' single-line-string-body '"' |
+//     '"""' newline multi-line-string-body? newline ws* '"""'
+fn quoted_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
+    choice((multiline_escaped_string(), escaped_string()))
 }
 
 // identifier-string :=
@@ -393,7 +395,7 @@ fn unambiguous_ident<'src>() -> impl Parser<'src, Input<'src>, &'src str, Error>
 
 // signed-ident := sign ((identifier-char - digit - '.') identifier-char*)?
 fn signed_ident<'src>() -> impl Parser<'src, Input<'src>, &'src str, Error> + Clone {
-    sign_char()
+    sign()
         .then(
             id_sans_dig_point()
                 .then(identifier_char().repeated())
@@ -404,14 +406,15 @@ fn signed_ident<'src>() -> impl Parser<'src, Input<'src>, &'src str, Error> + Cl
 
 // dotted-ident := sign? '.' ((identifier-char - digit) identifier-char*)?
 fn dotted_ident<'src>() -> impl Parser<'src, Input<'src>, &'src str, Error> + Clone {
-    sign_char()
+    sign()
         .or_not()
         .then(just('.'))
         .then(id_sans_dig().then(identifier_char().repeated()).or_not())
         .to_slice()
 }
 
-fn sign_char<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
+// sign := '+' | '-'
+fn sign<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
     just('+').or(just('-'))
 }
 
