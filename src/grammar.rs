@@ -537,6 +537,7 @@ fn prop_or_arg<S: Span>() -> impl Parser<char, PropOrArg<S>, Error = Error<S>> {
         .ignore_then(prop_or_arg_inner())
         .map(|_| PropOrArg::Ignore)
         .or(prop_or_arg_inner())
+        .boxed()
 }
 
 fn line_space<S: Span>() -> impl Parser<char, (), Error = Error<S>> {
