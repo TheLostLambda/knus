@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- Boxed one grammar node (`prop_or_arg`) so the longest monomorphized symbol names stay under the macOS 4096-byte limit. This removes the need for a custom linker (`rust-lld`) when building or `cargo install`ing on macOS, with no measurable parsing-performance impact (#49)
+
 ## [3.3.1] - 2025-04-30
 
 ### Added
