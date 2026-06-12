@@ -20,6 +20,18 @@ pub fn emit_enum(e: &Enum) -> syn::Result<TokenStream> {
         common_generics.lt_token = Some(Default::default());
         common_generics.gt_token = Some(Default::default());
     }
+
+    for param in e.generics.type_params() {
+        let ident = &param.ident;
+
+        common_generics
+            .make_where_clause()
+            .predicates
+            .push(syn::parse_quote!(
+                #ident: ::knus::DecodeScalar
+            ));
+    }
+
     let (impl_gen, _, bounds) = common_generics.split_for_impl();
 
     let common = Common {

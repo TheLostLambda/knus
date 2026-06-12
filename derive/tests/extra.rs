@@ -29,6 +29,12 @@ struct NameAndType {
     type_name: Option<TypeName>,
 }
 
+#[derive(knus_derive::Decode, Debug, PartialEq)]
+struct GenericPlugin<T> {
+    #[knus(child)]
+    config: T,
+}
+
 fn parse<T: Decode>(text: &str) -> T {
     let mut nodes: Vec<T> = knus::parse("<test>", text).unwrap();
     assert_eq!(nodes.len(), 1);
@@ -96,6 +102,26 @@ fn parse_name_and_type() {
         NameAndType {
             node_name: "yyynode".into(),
             type_name: None,
+        }
+    );
+}
+
+#[test]
+fn parse_generic_field() {
+    assert_eq!(
+        parse::<GenericPlugin<NodeSpan>>(
+            r#"plugin {
+                config "hello" {
+                    child
+                }
+            }"#
+        ),
+        GenericPlugin {
+            config: NodeSpan {
+                span: Span(25, 86),
+                name: "hello".into(),
+                children: vec![Child],
+            }
         }
     );
 }

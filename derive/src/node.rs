@@ -28,6 +28,18 @@ pub fn emit_struct(s: &Struct, named: bool) -> syn::Result<TokenStream> {
         common_generics.lt_token = Some(Default::default());
         common_generics.gt_token = Some(Default::default());
     }
+
+    for param in s.generics.type_params() {
+        let ident = &param.ident;
+
+        common_generics
+            .make_where_clause()
+            .predicates
+            .push(syn::parse_quote!(
+                #ident: ::knus::Decode
+            ));
+    }
+
     let (impl_gen, _, bounds) = common_generics.split_for_impl();
 
     let common = Common {
