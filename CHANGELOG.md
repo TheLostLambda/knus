@@ -6,7 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-### Changed
+## [3.4.0] - 2026-06-21
+
+### Added
+
+- Added support for parsing named enum fields (#31)
+
+### Fixed
 
 - Boxed one grammar node (`prop_or_arg`) so the longest monomorphized symbol names stay under the macOS 4096-byte limit. This removes the need for a custom linker (`rust-lld`) when building or `cargo install`ing on macOS, with no measurable parsing-performance impact (#49)
 
@@ -29,6 +35,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 The beginning of time — this version is identical to [`knuffel` v3.2.0](https://crates.io/crates/knuffel/3.2.0).
 
-[unreleased]: https://github.com/TheLostLambda/knus/compare/v3.3.1...HEAD
+[unreleased]: https://github.com/TheLostLambda/knus/compare/v3.4.0...HEAD
+[3.4.0]: https://github.com/TheLostLambda/knus/compare/v3.3.1...v3.4.0
 [3.3.1]: https://github.com/TheLostLambda/knus/compare/v3.2.0...v3.3.1
 [3.2.0]: https://github.com/TheLostLambda/knus/releases/tag/v3.2.0
