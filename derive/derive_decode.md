@@ -329,6 +329,20 @@ Note: we use same node type for `plugin` and `datum` nodes. Generally nodes do
 not match on the actual node names, it's the job of the parent node to sort
 out their children into the right buckets. Also see [Enums](#enums).
 
+Also note that you can specify name for the child node too `child(name="something")`, like so:
+```rust
+#[derive(knus::Decode)]
+struct Version {
+    #[knus(argument)]
+    number: u32
+}
+#[derive(knus::Decode)]
+struct MyNode {
+    #[knus(child(name="ver"))]
+    version: Version,
+}
+```
+
 ## Boolean Child Fields
 
 Sometimes you want to track just the presence of the child in the node.
@@ -733,7 +747,24 @@ The following variants supported:
    expected in such node
 5. Variant with `skip`, cannot be deserialized and can be in any form
 
-Enum variant names are matches against node names converted into `kebab-case`.
+Enum variant names are matches against node names converted into `kebab-case` by default.
+However, a `name` attribute can be specified, like so:
+```rust
+# #[derive(knus::Decode)] struct PrintString {}
+#[derive(knus::Decode)]
+enum Action {
+    #[knus(name="Create")]
+    Create(#[knus(argument)] String),
+
+    #[knus(name="PrintString")]
+    PrintString(PrintString),
+}
+```
+```kdl
+Create "xxx"
+PrintString "yyy" line=2
+```
+
 
 # Container Attributes
 
