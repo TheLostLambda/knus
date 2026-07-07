@@ -912,7 +912,7 @@ fn number<'src>() -> impl Parser<'src, Input<'src>, Literal, Error> + Clone {
 fn literal<'src>() -> impl Parser<'src, Input<'src>, Literal, Error> + Clone {
     // Check for `ident` last, because `ident` first checks for numbers,
     // and it can confuse keywords with raw strings.
-    choice((keyword(), number(), ident().map(Literal::String)))
+    choice((keyword(), number(), ident().map(Literal::String))).boxed()
 }
 
 fn type_name<'src>() -> impl Parser<'src, Input<'src>, TypeName, Error> + Clone {
