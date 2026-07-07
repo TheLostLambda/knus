@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Implemented KDL v2 multi-line strings (`"""` and `#"""`), including auto-dedentation and newline normalization (#46)
+
+### Changed
+
+- Changed the parser to use a single span type internally; the parse functions are no longer generic over the span type, but custom span types can still be obtained via conversion (#44)
+- Migrated the parser from `chumsky` v0.9.3 to v0.13 (#45)
+
 ## [3.3.1] - 2025-04-30
 
 ### Added
