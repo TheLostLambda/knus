@@ -250,7 +250,7 @@ impl fmt::Display for TokenFormat {
         use TokenFormat::*;
         match self {
             // do not escape quotes as we use backticks
-            Char('"') => write!(f, "`\"`"),
+            Char('"') => write!(f, r#"`"`"#),
             Char('\'') => write!(f, "`\'`"),
             // also single backslash should not confuse anybody in this context
             Char('\\') => write!(f, r"`\`"),
@@ -259,33 +259,33 @@ impl fmt::Display for TokenFormat {
             Token(s) => write!(f, "`{}`", s.escape_default()),
             Kind(s) => write!(f, "{}", s),
             Eoi => write!(f, "end of input"),
-            OpenRaw(0) => f.write_str("`r\"`"),
+            OpenRaw(0) => f.write_str(r#"`r"`"#),
             OpenRaw(n) => {
                 f.write_str("`")?;
                 for _ in 0..*n {
                     f.write_char('#')?;
                 }
-                f.write_str("\"`")
+                f.write_str(r#""`"#)
             }
-            CloseRaw(0) => f.write_str("`\"`"),
+            CloseRaw(0) => f.write_str(r#"`"`"#),
             CloseRaw(n) => {
-                f.write_str("`\"")?;
+                f.write_str(r#"`""#)?;
                 for _ in 0..*n {
                     f.write_char('#')?;
                 }
                 f.write_char('`')
             }
-            OpenMultiline => f.write_str("`\"\"\"`"),
-            CloseMultiline => f.write_str("`\"\"\"`"),
+            OpenMultiline => f.write_str(r#"`"""`"#),
+            CloseMultiline => f.write_str(r#"`"""`"#),
             OpenMultilineRaw(n) => {
                 f.write_str("`")?;
                 for _ in 0..*n {
                     f.write_char('#')?;
                 }
-                f.write_str("\"\"\"`")
+                f.write_str(r#""""`"#)
             }
             CloseMultilineRaw(n) => {
-                f.write_str("`\"\"\"")?;
+                f.write_str(r#"`""""#)?;
                 for _ in 0..*n {
                     f.write_char('#')?;
                 }
