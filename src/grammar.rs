@@ -24,31 +24,28 @@ pub(crate) fn document<'src>() -> impl Parser<'src, Input<'src>, Document, Error
 fn nodes<'src>() -> impl Parser<'src, Input<'src>, Vec<SpannedNode>, Error> + Clone {
     use PropOrArg::*;
     recursive(|nodes| {
-        let braced_nodes = just('{')
-            .ignore_then(
-                nodes
-                    .then_ignore(just('}'))
-                    .map_err_with_state(|e, span: SimpleSpan, _state| {
-                        if matches!(
-                            &e,
-                            ParseError::Unexpected {
-                                found: TokenFormat::Eoi,
-                                ..
-                            }
-                        ) {
-                            e.merge(ParseError::Unclosed {
-                                label: "curly braces",
-                                opened_at: Span::from(span).before_start(1),
-                                opened: '{'.into(),
-                                expected_at: Span::from(span).at_end(),
-                                expected: '}'.into(),
-                                found: None.into(),
-                            })
-                        } else {
-                            e
-                        }
-                    }),
-            );
+        let braced_nodes = just('{').ignore_then(nodes.then_ignore(just('}')).map_err_with_state(
+            |e, span: SimpleSpan, _state| {
+                if matches!(
+                    &e,
+                    ParseError::Unexpected {
+                        found: TokenFormat::Eoi,
+                        ..
+                    }
+                ) {
+                    e.merge(ParseError::Unclosed {
+                        label: "curly braces",
+                        opened_at: Span::from(span).before_start(1),
+                        opened: '{'.into(),
+                        expected_at: Span::from(span).at_end(),
+                        expected: '}'.into(),
+                        found: None.into(),
+                    })
+                } else {
+                    e
+                }
+            },
+        ));
 
         // base-node := slashdash? type? node-space* string
         //     (node-space* (node-space | slashdash) node-prop-or-arg)*
@@ -90,11 +87,7 @@ fn nodes<'src>() -> impl Parser<'src, Input<'src>, Vec<SpannedNode>, Error> + Cl
             .then(
                 node_space()
                     .repeated()
-                    .ignore_then(
-                        slashdash()
-                            .then_ignore(line_space().repeated())
-                            .or_not(),
-                    )
+                    .ignore_then(slashdash().then_ignore(line_space().repeated()).or_not())
                     .then(spanned(braced_nodes))
                     .or_not(),
             )
@@ -123,7 +116,8 @@ fn nodes<'src>() -> impl Parser<'src, Input<'src>, Vec<SpannedNode>, Error> + Cl
                     }
                 }
                 node
-            });
+            })
+            .boxed();
 
         // node := base-node node-terminator
         // Include terminator inside spanned() so node span covers the terminator
@@ -140,13 +134,11 @@ fn nodes<'src>() -> impl Parser<'src, Input<'src>, Vec<SpannedNode>, Error> + Cl
             .collect::<Vec<(Option<()>, Spanned<Node>)>>()
             .map(|vec| {
                 vec.into_iter()
-                    .filter_map(|(comment, node)| {
-                        if comment.is_none() {
-                            Some(node)
-                        } else {
-                            None
-                        }
-                    })
+                    .filter_map(
+                        |(comment, node)| {
+                            if comment.is_none() { Some(node) } else { None }
+                        },
+                    )
                     .collect()
             })
     })
@@ -162,13 +154,14 @@ enum PropOrArg {
 // (node-space | slashdash) node-prop-or-arg
 // Handles the slashdash alternative from base-node, returning PropOrArg::Ignore
 // for slashdashed entries.
-fn maybe_slashdash_node_prop_or_arg<'src>() -> impl Parser<'src, Input<'src>, PropOrArg, Error> + Clone
-{
+fn maybe_slashdash_node_prop_or_arg<'src>()
+-> impl Parser<'src, Input<'src>, PropOrArg, Error> + Clone {
     slashdash()
         .ignore_then(line_space().repeated())
         .ignore_then(node_prop_or_arg())
         .to(PropOrArg::Ignore)
         .or(node_prop_or_arg())
+        .boxed()
 }
 
 // node-prop-or-arg := prop | value
@@ -295,10 +288,8 @@ fn value<'src>() -> impl Parser<'src, Input<'src>, Value, Error> + Clone {
     spanned(r#type().then_ignore(node_space().repeated()))
         .or_not()
         .then(spanned(value_body))
-        .map(|(type_name, literal)| Value {
-            type_name,
-            literal,
-        })
+        .map(|(type_name, literal)| Value { type_name, literal })
+        .boxed()
 }
 
 // type := '(' node-space* string node-space* ')'
@@ -331,7 +322,7 @@ fn r#type<'src>() -> impl Parser<'src, Input<'src>, TypeName, Error> + Clone {
 // string := identifier-string | quoted-string | raw-string
 fn string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
     // raw_string before quoted_string so chumsky's error recovery works correctly
-    choice((identifier_string(), raw_string(), quoted_string()))
+    choice((identifier_string(), raw_string(), quoted_string())).boxed()
 }
 
 // quoted-string :=
@@ -664,8 +655,8 @@ fn raw_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone
 // raw-string-quotes :=
 //     '"' single-line-raw-string-body '"' |
 //     '"""' newline (multi-line-raw-string-body newline)? unicode-space* '"""'
-fn raw_string_quotes<'src>(
-) -> impl Parser<'src, Input<'src>, Box<str>, extra::Full<ParseError, (), usize>> + Clone {
+fn raw_string_quotes<'src>()
+-> impl Parser<'src, Input<'src>, Box<str>, extra::Full<ParseError, (), usize>> + Clone {
     let matching_hashes = just('#')
         .repeated()
         .configure(|cfg, hash_num| cfg.exactly(*hash_num));
@@ -974,7 +965,7 @@ fn line_space<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
 
 // node-space := ws* escline ws* | ws+
 fn node_space<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
-    ws().or(escline())
+    ws().or(escline()).boxed()
 }
 
 // version := '/-' unicode-space* 'kdl-version' unicode-space+ ('1' | '2') unicode-space* newline
@@ -1004,10 +995,20 @@ fn spanned<'src, T, P>(p: P) -> impl Parser<'src, Input<'src>, Spanned<T>, Error
 where
     P: Parser<'src, Input<'src>, T, Error> + Clone,
 {
-    p.map_with(|value, e| Spanned {
+    // Deliberately a free function, not a closure: a closure's type name
+    // would include `P`, doubling the length of the resulting parser's
+    // type name, which can overflow the linker's symbol-length limit.
+    p.map_with(make_spanned)
+}
+
+fn make_spanned<'src, T>(
+    value: T,
+    e: &mut chumsky::input::MapExtra<'src, '_, Input<'src>, Error>,
+) -> Spanned<T> {
+    Spanned {
         span: e.span().into(),
         value,
-    })
+    }
 }
 
 // --- Helper functions for multi-line strings ---
