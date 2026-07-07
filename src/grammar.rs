@@ -179,7 +179,7 @@ fn raw_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone
         .at_least(1)
         .count()
         // Single quote only - reject """ which is multi-line syntax
-        .then_ignore(just('"').then_ignore(just("\"\"").not().rewind()))
+        .then_ignore(just('"').then_ignore(just(r#""""#).not().rewind()))
         .ignore_with_ctx(
             any()
                 .and_is(just('"').then(matching_hashes).not())
@@ -280,12 +280,9 @@ fn dedent_multiline_string(s: &str) -> Result<(String, usize), MultilineStringEr
     // Where the opening newline is required, and the closing newline + indent forms the final line
 
     // Find the last newline - this separates the content from the closing indent
-    let last_newline_pos = match normalized.rfind('\n') {
-        Some(pos) => pos,
-        None => {
-            // No newline at all - invalid
-            return Err(MultilineStringError::NoOpeningNewline);
-        }
+    let Some(last_newline_pos) = normalized.rfind('\n') else {
+        // No newline at all - invalid
+        return Err(MultilineStringError::NoOpeningNewline);
     };
 
     // The indent is everything after the last newline
@@ -434,10 +431,10 @@ fn process_escapes(s: &str) -> Result<String, (usize, usize, String)> {
                         }
                     }
                 }
-                Some((_, c)) if c == ' ' || c == '\t' || c == '\n' || is_kdl_ws(c) => {
+                Some((_, c)) if c == '\n' || is_kdl_ws(c) => {
                     // Whitespace escape: consume whitespace and newlines, produce space
                     while let Some(&(_, next)) = chars.peek() {
-                        if next == ' ' || next == '\t' || next == '\n' || is_kdl_ws(next) {
+                        if next == '\n' || is_kdl_ws(next) {
                             chars.next();
                         } else {
                             break;
@@ -469,17 +466,17 @@ fn process_escapes(s: &str) -> Result<String, (usize, usize, String)> {
 /// Multi-line quoted string parser: """..."""
 /// The opening """ must be followed by a newline, and the closing """ must be on its own line.
 fn multiline_escaped_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
-    just("\"\"\"").ignore_then(
+    just(r#"""""#).ignore_then(
         // Capture raw content - one or two quotes are allowed, but not three
         choice((
             // One double-quote that isn't followed by two more (not """)
-            just('"').then_ignore(just("\"\"").not().rewind()),
+            just('"').then_ignore(just(r#""""#).not().rewind()),
             // Regular character (not quote)
             none_of(['"']),
         ))
         .repeated()
         .to_slice()
-        .then_ignore(just("\"\"\""))
+        .then_ignore(just(r#"""""#))
         .validate(|content: &str, extras, emit| {
             let span = Span::from(extras.span());
             // Note: span covers content + closing """, so span.end includes the closing delimiter
@@ -579,13 +576,13 @@ fn multiline_raw_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Erro
         .repeated()
         .at_least(1)
         .count()
-        .then_ignore(just("\"\"\""))
+        .then_ignore(just(r#"""""#))
         .ignore_with_ctx(
             any()
-                .and_is(just("\"\"\"").then(matching_hashes).not())
+                .and_is(just(r#"""""#).then(matching_hashes).not())
                 .repeated()
                 .to_slice()
-                .then(just("\"\"\"").ignore_then(matching_hashes.ignored()))
+                .then(just(r#"""""#).ignore_then(matching_hashes.ignored()))
                 .map_err_with(move |e: ParseError, extras| {
                     let hash_num = *extras.ctx();
                     if matches!(
@@ -662,7 +659,7 @@ fn esc_char<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
                 label: Some("invalid escape char"),
                 span: span.into(),
                 found: c.into(),
-                expected: "\"\\bfnrts".chars().map(|c| c.into()).collect(),
+                expected: r#""\bfnrts"#.chars().map(|c| c.into()).collect(),
             }),
         })
         .or(just('u').ignore_then(
@@ -701,7 +698,7 @@ fn esc_char<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
 fn escaped_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
     // Single quote only - reject """ which is multi-line syntax
     just('"')
-        .then_ignore(just("\"\"").not().rewind())
+        .then_ignore(just(r#""""#).not().rewind())
         .ignore_then(
             choice((
                 none_of(['"', '\\']),
