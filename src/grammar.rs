@@ -347,49 +347,22 @@ fn identifier_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> 
     .map(|v: &str| Box::<str>::from(v))
     .try_map(|s, span| {
         // disallowed-keyword-identifiers
+        const KEYWORDS: [&str; 6] = ["#true", "#false", "#null", "#nan", "#inf", "#-inf"];
         match &s[..] {
             "true" | "false" | "null" | "nan" | "inf" | "-inf" => Err(ParseError::Message {
                 label: Some("illegal identifier"),
                 span: span.into(),
                 message: format!("`{s}` is not allowed as a bare string"),
             }),
-            "#true" => Err(ParseError::Unexpected {
-                label: Some("keyword"),
-                span: span.into(),
-                found: TokenFormat::Token("#true"),
-                expected: expected_kind("identifier"),
-            }),
-            "#false" => Err(ParseError::Unexpected {
-                label: Some("keyword"),
-                span: span.into(),
-                found: TokenFormat::Token("#false"),
-                expected: expected_kind("identifier"),
-            }),
-            "#null" => Err(ParseError::Unexpected {
-                label: Some("keyword"),
-                span: span.into(),
-                found: TokenFormat::Token("#null"),
-                expected: expected_kind("identifier"),
-            }),
-            "#nan" => Err(ParseError::Unexpected {
-                label: Some("keyword"),
-                span: span.into(),
-                found: TokenFormat::Token("#nan"),
-                expected: expected_kind("identifier"),
-            }),
-            "#inf" => Err(ParseError::Unexpected {
-                label: Some("keyword"),
-                span: span.into(),
-                found: TokenFormat::Token("#inf"),
-                expected: expected_kind("identifier"),
-            }),
-            "#-inf" => Err(ParseError::Unexpected {
-                label: Some("keyword"),
-                span: span.into(),
-                found: TokenFormat::Token("#-inf"),
-                expected: expected_kind("identifier"),
-            }),
-            _ => Ok(s),
+            _ => match KEYWORDS.iter().find(|&&kw| kw == &s[..]) {
+                Some(&kw) => Err(ParseError::Unexpected {
+                    label: Some("keyword"),
+                    span: span.into(),
+                    found: TokenFormat::Token(kw),
+                    expected: expected_kind("identifier"),
+                }),
+                None => Ok(s),
+            },
         }
     })
 }
