@@ -19,7 +19,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         # The first version is the MSRV and needs to be kept in sync with Cargo.toml.
-        toolchain: ["1.93.0", stable, beta, nightly]
+        toolchain: ["1.85.0", stable, beta, nightly]
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
