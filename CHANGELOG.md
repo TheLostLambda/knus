@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 
 - Implemented KDL v2 multi-line strings (`"""` and `#"""`), including auto-dedentation and newline normalization (#46)
+- Declared a minimum supported Rust version of 1.93, which is required by edition 2024 and is now covered by CI (#53)
 
 ### Changed
 
