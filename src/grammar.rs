@@ -11,6 +11,33 @@ use crate::span::{Span, Spanned};
 type Error = extra::Err<ParseError>;
 type Input<'src> = &'src str;
 
+// A note on parser type sizes: every combinator spells out its whole
+// sub-parser in its own type, so a rule used from several places multiplies
+// the size of every type above it -- growth here is multiplicative, not
+// additive. Rust's pre-1.97 `legacy` symbol mangling writes those types into
+// symbol names verbatim, and the macOS linker rejects any symbol over 1 MiB
+// with `ld: Assertion failed: (name.size() <= maxLength)`. This grammar has
+// been over that limit before. (Rust 1.97 defaults to `v0` mangling, which
+// compresses repeats; on 1.97+ the names stay tiny either way.)
+//
+// Three things keep the types small, in descending order of effect:
+//
+//  * A generic wrapper must not pass a closure to a combinator. A closure
+//    declared in `fn spanned<T, P>(p: P)` is named `spanned::<T, P>::{closure}`
+//    and so spells out the whole of `P` a second time; because `spanned` nests,
+//    those doublings compound. Hence the free `make_spanned` function.
+//  * Prefer a single `filter` over a chain of `or`s in rules that whitespace
+//    handling reaches, since those are instantiated dozens of times -- see
+//    `newline` and `single_line_comment`.
+//  * Mention a large sub-parser once rather than in two alternatives, and give
+//    repeated fragments a shared function -- see `maybe_slashdash_node_prop_or_arg`
+//    and the `opt_type` / `literal` / `string_expecting_identifier` helpers.
+//
+// If that is ever not enough, `.boxed()` erases a parser's type for its
+// *callers*. The useful place for it is a rule with several callers, not the
+// outermost one: boxing at the end of a chain leaves that chain's own type
+// untouched. It costs a little parse throughput, so it is a last resort.
+
 // document := bom? version? nodes
 pub(crate) fn document<'src>() -> impl Parser<'src, Input<'src>, Document, Error> {
     bom()
@@ -54,28 +81,8 @@ fn nodes<'src>() -> impl Parser<'src, Input<'src>, Vec<SpannedNode>, Error> + Cl
         //     (node-space* slashdash node-children)*
         //     node-space*
 
-        // The grammar uses `string` for the node name, but we also try to
-        // match numbers so we can report "found number, expected identifier".
-        let node_name = choice((
-            number().map(Err),
-            identifier_string().map(Ok),
-            string().map(Ok),
-        ))
-        .validate(|res, extras, emit| {
-            res.unwrap_or_else(|_| {
-                emit.emit(ParseError::Unexpected {
-                    label: Some("unexpected number"),
-                    span: extras.span().into(),
-                    found: TokenFormat::Kind("number"),
-                    expected: expected_kind("identifier"),
-                });
-                "".into()
-            })
-        });
-
-        let base_node = spanned(r#type().then_ignore(node_space().repeated()))
-            .or_not()
-            .then(spanned(node_name))
+        let base_node = opt_type()
+            .then(spanned(string_expecting_identifier()))
             .then(
                 node_space()
                     .repeated()
@@ -116,8 +123,7 @@ fn nodes<'src>() -> impl Parser<'src, Input<'src>, Vec<SpannedNode>, Error> + Cl
                     }
                 }
                 node
-            })
-            .boxed();
+            });
 
         // node := base-node node-terminator
         // Include terminator inside spanned() so node span covers the terminator
@@ -157,11 +163,12 @@ enum PropOrArg {
 fn maybe_slashdash_node_prop_or_arg<'src>()
 -> impl Parser<'src, Input<'src>, PropOrArg, Error> + Clone {
     slashdash()
-        .ignore_then(line_space().repeated())
-        .ignore_then(node_prop_or_arg())
-        .to(PropOrArg::Ignore)
-        .or(node_prop_or_arg())
-        .boxed()
+        .or_not()
+        .then(node_prop_or_arg())
+        .map(|(slashdashed, item)| match slashdashed {
+            Some(()) => PropOrArg::Ignore,
+            None => item,
+        })
 }
 
 // node-prop-or-arg := prop | value
@@ -178,18 +185,9 @@ fn node_prop_or_arg<'src>() -> impl Parser<'src, Input<'src>, PropOrArg, Error> 
         .then(unicode_space().repeated())
         .ignore_then(value());
 
-    // string | number | keyword (+ keyword-number), used to parse a
-    // potential prop name or argument value
-    let value_body = choice((
-        keyword(),
-        keyword_number(),
-        number(),
-        string().map(Literal::String),
-    ));
-
     choice((
-        spanned(value_body)
-            .then(equals_value.clone().or_not())
+        spanned(literal())
+            .then(equals_value.or_not())
             .validate(|(name, value), _, emit| {
                 let span = name.span;
                 match (&name.value, &value) {
@@ -246,25 +244,6 @@ fn node_prop_or_arg<'src>() -> impl Parser<'src, Input<'src>, PropOrArg, Error> 
                     value.unwrap(),
                 )
             }),
-        spanned(identifier_string())
-            .then(equals_value.or_not())
-            .validate(|(name, value), e, emit| {
-                if let Some(value) = value {
-                    Prop(name, value)
-                } else {
-                    emit.emit(ParseError::MessageWithHelp {
-                        label: Some("unexpected identifier"),
-                        span: e.span().into(),
-                        message: "identifiers cannot be used as arguments".into(),
-                        help: "consider enclosing in double quotes \"..\"",
-                    });
-                    // this is invalid, but it's just a fallback
-                    Arg(Value {
-                        type_name: None,
-                        literal: name.map(Literal::String),
-                    })
-                }
-            }),
         // Typed value like (string)"hello" — always an argument
         value().map(Arg),
     ))
@@ -277,25 +256,32 @@ fn node_terminator<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone 
 
 // value := type? node-space* (string | number | keyword)
 fn value<'src>() -> impl Parser<'src, Input<'src>, Value, Error> + Clone {
-    // string | number | keyword (+ keyword-number)
-    let value_body = choice((
+    opt_type()
+        .then(spanned(literal()))
+        .map(|(type_name, literal)| Value { type_name, literal })
+}
+
+// `type? node-space*`, shared by `base-node` and `value`
+fn opt_type<'src>() -> impl Parser<'src, Input<'src>, Option<Spanned<TypeName>>, Error> + Clone {
+    spanned(r#type().then_ignore(node_space().repeated())).or_not()
+}
+
+// `string | number | keyword`, the tail of both `value` and a prop name.
+// The grammar puts `keyword-number` under `number`, but it is matched here
+// instead so that it does not pollute the expected-token set of `number`.
+fn literal<'src>() -> impl Parser<'src, Input<'src>, Literal, Error> + Clone {
+    choice((
         keyword(),
         keyword_number(),
         number(),
         string().map(Literal::String),
-    ));
-
-    spanned(r#type().then_ignore(node_space().repeated()))
-        .or_not()
-        .then(spanned(value_body))
-        .map(|(type_name, literal)| Value { type_name, literal })
-        .boxed()
+    ))
 }
 
-// type := '(' node-space* string node-space* ')'
-fn r#type<'src>() -> impl Parser<'src, Input<'src>, TypeName, Error> + Clone {
-    // The grammar uses `string` here, but we also try to match numbers
-    // so we can report "found number, expected identifier" errors.
+// The grammar uses plain `string` for node names and type annotations, but we
+// also try to match numbers so we can report "found number, expected
+// identifier" instead of a bare parse failure.
+fn string_expecting_identifier<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
     choice((
         number().map(Err),
         identifier_string().map(Ok),
@@ -312,17 +298,22 @@ fn r#type<'src>() -> impl Parser<'src, Input<'src>, TypeName, Error> + Clone {
             "".into()
         })
     })
-    .delimited_by(
-        just('(').then(node_space().repeated()),
-        node_space().repeated().then(just(')')),
-    )
-    .map(TypeName::from_string)
+}
+
+// type := '(' node-space* string node-space* ')'
+fn r#type<'src>() -> impl Parser<'src, Input<'src>, TypeName, Error> + Clone {
+    string_expecting_identifier()
+        .delimited_by(
+            just('(').then(node_space().repeated()),
+            node_space().repeated().then(just(')')),
+        )
+        .map(TypeName::from_string)
 }
 
 // string := identifier-string | quoted-string | raw-string
 fn string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
     // raw_string before quoted_string so chumsky's error recovery works correctly
-    choice((identifier_string(), raw_string(), quoted_string())).boxed()
+    choice((identifier_string(), raw_string(), quoted_string()))
 }
 
 // quoted-string :=
@@ -845,14 +836,16 @@ fn unicode_space<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
 
 // single-line-comment := '//' ^newline* (newline | eof)
 fn single_line_comment<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
+    // `^newline*` is expressed as a character filter rather than
+    // `any().and_is(newline().not())` so that `newline` is instantiated once
+    // here instead of twice; see the note on `newline` itself.
     begin_comment('/')
-        .then(
-            any()
-                .and_is(newline().not())
-                .and_is(end().not())
-                .repeated()
-                .then(newline().or(end())),
+        .ignore_then(
+            any::<_, Error>()
+                .filter(|c: &char| !is_newline_char(c))
+                .repeated(),
         )
+        .then(newline().or(end()))
         .ignored()
 }
 
@@ -918,17 +911,30 @@ fn escline<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
 
 // newline := See Table (All Newline White_Space)
 fn newline<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
+    // Matching the single-character newlines with one `filter` rather than a
+    // chain of `or`s keeps this parser's *type* small. `newline` is reached
+    // from `ws`, `line-space`, `node-space` and `node-terminator`, so it is
+    // instantiated dozens of times and its size is multiplied throughout.
     just('\r')
-        .or_not()
-        .ignore_then(just('\n'))
-        .or(just('\r')) // Carriage return
-        .or(just('\x0C')) // Form feed
-        .or(just('\x0B')) // Vertical tab
-        .or(just('\u{0085}')) // Next line
-        .or(just('\u{2028}')) // Line separator
-        .or(just('\u{2029}')) // Paragraph separator
+        .then_ignore(just('\n').or_not()) // CR, or CRLF
         .ignored()
+        .or(any::<_, Error>()
+            .filter(|c: &char| is_newline_char(c) && *c != '\r')
+            .ignored())
         .map_err(|e: ParseError| e.with_expected_kind("newline"))
+}
+
+fn is_newline_char(c: &char) -> bool {
+    matches!(
+        c,
+        '\r' |          // Carriage return
+        '\n' |          // Line feed
+        '\x0C' |        // Form feed
+        '\x0B' |        // Vertical tab
+        '\u{0085}' |    // Next line
+        '\u{2028}' |    // Line separator
+        '\u{2029}' // Paragraph separator
+    )
 }
 
 // line-space := node-space | newline | single-line-comment
@@ -938,7 +944,7 @@ fn line_space<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
 
 // node-space := ws* escline ws* | ws+
 fn node_space<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
-    ws().or(escline()).boxed()
+    ws().or(escline())
 }
 
 // version := '/-' unicode-space* 'kdl-version' unicode-space+ ('1' | '2') unicode-space* newline
