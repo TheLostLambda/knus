@@ -20,40 +20,40 @@ use std::str::FromStr;
 use crate::span::Spanned;
 
 /// A shortcut for nodes children that includes span of enclosing braces `{..}`
-pub type SpannedChildren<S> = Spanned<Vec<SpannedNode<S>>, S>;
+pub type SpannedChildren = Spanned<Vec<SpannedNode>>;
 /// KDL names with span information are represented using this type
-pub type SpannedName<S> = Spanned<Box<str>, S>;
+pub type SpannedName = Spanned<Box<str>>;
 /// A KDL node with span of the whole node (including children)
-pub type SpannedNode<S> = Spanned<Node<S>, S>;
+pub type SpannedNode = Spanned<Node>;
 
 /// Single node of the KDL document
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
 #[cfg_attr(feature = "minicbor", derive(minicbor::Encode, minicbor::Decode))]
-pub struct Node<S> {
+pub struct Node {
     /// A type name if specified in parenthesis
     #[cfg_attr(feature = "minicbor", n(0))]
-    pub type_name: Option<Spanned<TypeName, S>>,
+    pub type_name: Option<Spanned<TypeName>>,
     /// A node name
     #[cfg_attr(feature = "minicbor", n(1))]
-    pub node_name: SpannedName<S>,
+    pub node_name: SpannedName,
     /// Positional arguments
     #[cfg_attr(feature = "minicbor", n(2))]
-    pub arguments: Vec<Value<S>>,
+    pub arguments: Vec<Value>,
     /// Named properties
     #[cfg_attr(feature = "minicbor", n(3))]
-    pub properties: BTreeMap<SpannedName<S>, Value<S>>,
+    pub properties: BTreeMap<SpannedName, Value>,
     /// Node's children. This field is not none if there are braces `{..}`
     #[cfg_attr(feature = "minicbor", n(4))]
-    pub children: Option<SpannedChildren<S>>,
+    pub children: Option<SpannedChildren>,
 }
 
 /// KDL document root
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
 #[cfg_attr(feature = "minicbor", derive(minicbor::Encode, minicbor::Decode))]
-pub struct Document<S> {
+pub struct Document {
     /// Nodes of the document
     #[cfg_attr(feature = "minicbor", n(0))]
-    pub nodes: Vec<SpannedNode<S>>,
+    pub nodes: Vec<SpannedNode>,
 }
 
 /// Possible integer radices described by the KDL specification
@@ -93,13 +93,13 @@ pub struct Decimal(#[cfg_attr(feature = "minicbor", n(0))] pub Box<str>);
 /// Possibly typed KDL scalar value
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
 #[cfg_attr(feature = "minicbor", derive(minicbor::Encode, minicbor::Decode))]
-pub struct Value<S> {
+pub struct Value {
     /// A type name if specified in parenthesis
     #[cfg_attr(feature = "minicbor", n(0))]
-    pub type_name: Option<Spanned<TypeName, S>>,
+    pub type_name: Option<Spanned<TypeName>>,
     /// The actual value literal
     #[cfg_attr(feature = "minicbor", n(1))]
-    pub literal: Spanned<Literal, S>,
+    pub literal: Spanned<Literal>,
 }
 
 /// Type identifier
@@ -136,6 +136,10 @@ pub enum BuiltinType {
     U64,
     /// `i64`: 64-bit signed integer type
     I64,
+    /// `u128`: 128-bit unsigned integer type
+    U128,
+    /// `i128`: 128-bit signed integer type
+    I128,
     /// `usize`: platform-dependent unsigned integer type
     Usize,
     /// `isize`: platform-dependent signed integer type
@@ -168,11 +172,20 @@ pub enum Literal {
     /// String value
     #[cfg_attr(feature = "minicbor", n(4))]
     String(#[cfg_attr(feature = "minicbor", n(0))] Box<str>),
+    /// Not a number
+    #[cfg_attr(feature = "minicbor", n(5))]
+    Nan,
+    /// Infinity
+    #[cfg_attr(feature = "minicbor", n(6))]
+    Inf,
+    /// Negative Infinity
+    #[cfg_attr(feature = "minicbor", n(7))]
+    NegInf,
 }
 
-impl<S> Node<S> {
+impl Node {
     /// Returns node children
-    pub fn children(&self) -> impl ExactSizeIterator<Item = &Spanned<Node<S>, S>> {
+    pub fn children(&self) -> impl ExactSizeIterator<Item = &Spanned<Node>> {
         self.children
             .as_ref()
             .map(|c| c.iter())
@@ -194,6 +207,8 @@ impl BuiltinType {
             I32 => "i32",
             U64 => "u64",
             I64 => "i64",
+            U128 => "u128",
+            I128 => "i128",
             Usize => "usize",
             Isize => "isize",
             F32 => "f32",
@@ -250,6 +265,8 @@ impl FromStr for BuiltinType {
             "i32" => Ok(I32),
             "u64" => Ok(U64),
             "i64" => Ok(I64),
+            "u128" => Ok(U128),
+            "i128" => Ok(I128),
             "f32" => Ok(F32),
             "f64" => Ok(F64),
             "base64" => Ok(Base64),

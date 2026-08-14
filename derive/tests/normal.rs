@@ -4,8 +4,8 @@ use std::fmt;
 
 use miette::Diagnostic;
 
+use knus::Decode;
 use knus::traits::DecodeChildren;
-use knus::{Decode, span::Span};
 
 #[derive(knus_derive::Decode, Debug, PartialEq)]
 struct Arg1 {
@@ -197,13 +197,13 @@ struct OptBytes {
     data: Option<Vec<u8>>,
 }
 
-fn parse<T: Decode<Span>>(text: &str) -> T {
+fn parse<T: Decode>(text: &str) -> T {
     let mut nodes: Vec<T> = knus::parse("<test>", text).unwrap();
     assert_eq!(nodes.len(), 1);
     nodes.remove(0)
 }
 
-fn parse_err<T: Decode<Span> + fmt::Debug>(text: &str) -> String {
+fn parse_err<T: Decode + fmt::Debug>(text: &str) -> String {
     let err = knus::parse::<Vec<T>>("<test>", text).unwrap_err();
     err.related()
         .unwrap()
@@ -212,11 +212,11 @@ fn parse_err<T: Decode<Span> + fmt::Debug>(text: &str) -> String {
         .join("\n")
 }
 
-fn parse_doc<T: DecodeChildren<Span>>(text: &str) -> T {
+fn parse_doc<T: DecodeChildren>(text: &str) -> T {
     knus::parse("<test>", text).unwrap()
 }
 
-fn parse_doc_err<T: DecodeChildren<Span> + fmt::Debug>(text: &str) -> String {
+fn parse_doc_err<T: DecodeChildren + fmt::Debug>(text: &str) -> String {
     let err = knus::parse::<T>("<test>", text).unwrap_err();
     err.related()
         .unwrap()
@@ -320,7 +320,7 @@ fn parse_arg_def_value() {
         }
     );
     assert_eq!(
-        parse::<ArgDefOptValue>(r#"node null"#),
+        parse::<ArgDefOptValue>(r#"node #null"#),
         ArgDefOptValue { name: None }
     );
 }
@@ -334,7 +334,7 @@ fn parse_opt_arg() {
         }
     );
     assert_eq!(parse::<OptArg>(r#"node"#), OptArg { name: None });
-    assert_eq!(parse::<OptArg>(r#"node null"#), OptArg { name: None });
+    assert_eq!(parse::<OptArg>(r#"node #null"#), OptArg { name: None });
 }
 
 #[test]
@@ -412,7 +412,7 @@ fn parse_prop_def_value() {
         }
     );
     assert_eq!(
-        parse::<PropDefOptValue>(r#"node label=null"#),
+        parse::<PropDefOptValue>(r#"node label=#null"#),
         PropDefOptValue { label: None }
     );
 }
@@ -519,7 +519,7 @@ fn parse_opt_prop() {
     );
     assert_eq!(parse::<OptProp>(r#"node"#), OptProp { label: None });
     assert_eq!(
-        parse::<OptProp>(r#"node label=null"#),
+        parse::<OptProp>(r#"node label=#null"#),
         OptProp { label: None }
     );
 }
@@ -803,7 +803,7 @@ fn parse_str() {
     );
     assert!(parse_err::<ParseOpt>(r#"server listen="2/3""#).contains("invalid"));
     assert_eq!(
-        parse::<ParseOpt>(r#"server listen=null"#),
+        parse::<ParseOpt>(r#"server listen=#null"#),
         ParseOpt { listen: None }
     );
 }
@@ -840,7 +840,7 @@ fn parse_bytes() {
         }
     );
     assert_eq!(
-        parse::<OptBytes>(r#"node data=null"#),
+        parse::<OptBytes>(r#"node data=#null"#),
         OptBytes { data: None }
     );
 }

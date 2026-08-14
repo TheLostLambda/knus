@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 
-use knus::span::Span;
 use knus::traits::DecodeChildren;
 
 #[derive(knus_derive::Decode, Debug, PartialEq)]
@@ -17,7 +16,7 @@ struct Scalars {
     boolean: bool,
 }
 
-fn parse<T: DecodeChildren<Span>>(text: &str) -> T {
+fn parse<T: DecodeChildren>(text: &str) -> T {
     knus::parse("<test>", text).unwrap()
 }
 
@@ -30,7 +29,7 @@ fn parse_enum() {
             u64 1234
             f64 16.125e+1
             path "/hello/world"
-            boolean true
+            boolean #true
         "#
         ),
         Scalars {
