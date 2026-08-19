@@ -84,32 +84,46 @@ fn nodes<'src>() -> impl Parser<'src, Input<'src>, Vec<SpannedNode>, Error> + Cl
         let base_node = opt_type()
             .then(spanned(string_expecting_identifier()))
             .then(
-                node_space()
-                    .repeated()
-                    .at_least(1)
-                    .ignore_then(maybe_slashdash_node_prop_or_arg())
+                maybe_slashdash_node_prop_or_arg()
                     .repeated()
                     .collect::<Vec<PropOrArg>>(),
             )
+            // The three children-block lines of `base-node` differ only in
+            // whether the block is slashdashed, so they are parsed as one flat
+            // repetition and reduced to the single block that survives.
             .then(
                 node_space()
                     .repeated()
-                    .ignore_then(slashdash().then_ignore(line_space().repeated()).or_not())
+                    .ignore_then(slashdash().or_not())
                     .then(spanned(braced_nodes))
-                    .or_not(),
+                    .repeated()
+                    .collect::<Vec<(Option<()>, Spanned<Vec<SpannedNode>>)>>()
+                    .validate(|blocks, _, emit| {
+                        let mut children = None;
+                        for (slashdashed, block) in blocks {
+                            if slashdashed.is_some() {
+                                continue;
+                            }
+                            if children.is_some() {
+                                emit.emit(ParseError::Message {
+                                    label: Some("unexpected children block"),
+                                    span: block.span,
+                                    message: "a node can only have one children block".into(),
+                                });
+                            }
+                            children = Some(block);
+                        }
+                        children
+                    }),
             )
             .then_ignore(node_space().repeated())
-            .map(|(((type_name, node_name), line_items), opt_children)| {
+            .map(|(((type_name, node_name), line_items), children)| {
                 let mut node = Node {
                     type_name,
                     node_name,
                     properties: BTreeMap::new(),
                     arguments: Vec::new(),
-                    children: match opt_children {
-                        Some((Some(_comment), _)) => None,
-                        Some((None, children)) => Some(children),
-                        None => None,
-                    },
+                    children,
                 };
                 for item in line_items {
                     match item {
@@ -157,18 +171,25 @@ enum PropOrArg {
     Ignore,
 }
 
-// (node-space | slashdash) node-prop-or-arg
+// node-space* (node-space | slashdash) node-prop-or-arg
 // Handles the slashdash alternative from base-node, returning PropOrArg::Ignore
-// for slashdashed entries.
+// for slashdashed entries. A slashdash may stand in for the whitespace that
+// would otherwise have to separate an entry from what precedes it, so both
+// `node /-1` and `node/-1` are a node with one commented-out argument.
 fn maybe_slashdash_node_prop_or_arg<'src>()
 -> impl Parser<'src, Input<'src>, PropOrArg, Error> + Clone {
-    slashdash()
-        .or_not()
-        .then(node_prop_or_arg())
-        .map(|(slashdashed, item)| match slashdashed {
-            Some(()) => PropOrArg::Ignore,
-            None => item,
-        })
+    choice((
+        node_space()
+            .repeated()
+            .at_least(1)
+            .ignore_then(slashdash().or_not()),
+        slashdash().map(Some),
+    ))
+    .then(node_prop_or_arg())
+    .map(|(slashdashed, item)| match slashdashed {
+        Some(()) => PropOrArg::Ignore,
+        None => item,
+    })
 }
 
 // node-prop-or-arg := prop | value
@@ -250,8 +271,19 @@ fn node_prop_or_arg<'src>() -> impl Parser<'src, Input<'src>, PropOrArg, Error> 
 }
 
 // node-terminator := single-line-comment | newline | ';' | eof
+//
+// `node-children := '{' nodes final-node? '}'` lets the last node inside a
+// child block go without a terminator, which is the same thing as letting a
+// closing brace terminate it -- so `}` is accepted here without being consumed.
+// Outside a child block a stray `}` still fails, just one rule further out.
 fn node_terminator<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
-    choice((newline(), single_line_comment(), just(';').ignored(), end()))
+    choice((
+        newline(),
+        single_line_comment(),
+        just(';').ignored(),
+        just('}').ignored().rewind(), // FIXME: Can this be avoided?
+        end(),
+    ))
 }
 
 // value := type? node-space* (string | number | keyword)
@@ -330,10 +362,12 @@ fn identifier_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> 
     choice((
         // unambiguous-ident: (identifier-char - digit - sign - '.') identifier-char*
         unambiguous_ident(),
+        // dotted-ident: sign? '.' ((identifier-char - digit) identifier-char*)?
+        // Tried before signed-ident, which would otherwise match just the sign
+        // of `+.` and leave the dot behind.
+        dotted_ident(),
         // signed-ident: sign ((identifier-char - digit - '.') identifier-char*)?
         signed_ident(),
-        // dotted-ident: sign? '.' ((identifier-char - digit) identifier-char*)?
-        dotted_ident(),
     ))
     .map(|v: &str| Box::<str>::from(v))
     .try_map(|s, span| {
@@ -450,43 +484,55 @@ fn id_sans_sign_dig_point<'src>() -> impl Parser<'src, Input<'src>, char, Error>
 
 // Single-line quoted string: '"' single-line-string-body '"'
 fn single_line_quoted_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
+    // single-line-string-body := (string-character - newline)*
+    // A whitespace escape stands for nothing at all, hence the `Option`: it is
+    // one of the alternatives, but the only one that yields no character.
+    let character = choice((
+        any::<_, Error>()
+            .filter(|c| !matches!(c, '"' | '\\') && !is_newline_char(c))
+            .map(Some),
+        just('\\').ignore_then(escape()).map(Some),
+        ws_escape().to(None),
+    ));
+
     // Single quote only - reject """ which is multi-line syntax
     just('"')
         .then_ignore(just("\"\"").not().rewind())
         .ignore_then(
-            choice((
-                none_of(['"', '\\']),
-                just('\\').ignore_then(escape()),
-                // ws-escape
-                just('\\')
-                    .then(unicode_space().or(newline()).repeated().at_least(1))
-                    .map(|_| ' '),
-            ))
-            .repeated()
-            .collect::<String>()
-            .then_ignore(just('"'))
-            .map(|val| val.into())
-            .map_err_with_state(|e: ParseError, span, _state| {
-                if matches!(
-                    &e,
-                    ParseError::Unexpected {
-                        found: TokenFormat::Eoi,
-                        ..
+            character
+                .repeated()
+                .collect::<Vec<Option<char>>>()
+                .map(|chars| chars.into_iter().flatten().collect::<String>())
+                .then_ignore(just('"'))
+                .map(|val| val.into())
+                .map_err_with_state(|e: ParseError, span, _state| {
+                    if matches!(
+                        &e,
+                        ParseError::Unexpected {
+                            found: TokenFormat::Eoi,
+                            ..
+                        }
+                    ) {
+                        e.merge(ParseError::Unclosed {
+                            label: "string",
+                            opened_at: Span::from(span).before_start(1),
+                            opened: '"'.into(),
+                            expected_at: Span::from(span).at_end(),
+                            expected: '"'.into(),
+                            found: None.into(),
+                        })
+                    } else {
+                        e
                     }
-                ) {
-                    e.merge(ParseError::Unclosed {
-                        label: "string",
-                        opened_at: Span::from(span).before_start(1),
-                        opened: '"'.into(),
-                        expected_at: Span::from(span).at_end(),
-                        expected: '"'.into(),
-                        found: None.into(),
-                    })
-                } else {
-                    e
-                }
-            }),
+                }),
         )
+}
+
+// ws-escape := '\\' (unicode-space | newline)+
+fn ws_escape<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
+    just('\\')
+        .then(unicode_space().or(newline()).repeated().at_least(1))
+        .ignored()
 }
 
 // string-character escape handling
@@ -543,12 +589,17 @@ fn escape<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
 // Multi-line quoted string: '"""' newline ... '"""'
 fn multi_line_quoted_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
     just("\"\"\"").ignore_then(
-        // Capture raw content - one or two quotes are allowed, but not three
+        // multi-line-string-body := ('"' ^'"' | '""' ^'"' | string-character)*?
         choice((
-            // One double-quote that isn't followed by two more (not """)
-            just('"').then_ignore(just("\"\"").not().rewind()),
+            // An escape is taken whole, so that the `"` of `\"` cannot be read
+            // as part of the closing delimiter, nor the second `\` of `\\` as
+            // the start of another escape.
+            just('\\').then(any()).ignored(),
+            // One or two double-quotes, as long as a third does not follow.
+            just("\"\"").then_ignore(just('"').not().rewind()).ignored(),
+            just('"').then_ignore(just('"').not().rewind()).ignored(),
             // Regular character (not quote)
-            none_of(['"']),
+            none_of('"').ignored(),
         ))
         .repeated()
         .to_slice()
@@ -556,10 +607,16 @@ fn multi_line_quoted_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, 
         .validate(|content: &str, extras, emit| {
             let span = Span::from(extras.span());
 
-            let (dedented, indent_len) = match dedent_multiline_string(content) {
+            // The spec requires the dedent to happen *after* whitespace
+            // escapes are resolved but *before* any other escape is: a `\` at
+            // the end of a line swallows the next line's indentation, and so
+            // can change what the closing line's prefix even is.
+            let (resolved, map) = resolve_ws_escapes(content, false);
+
+            let (dedented, indent_len) = match dedent_multiline_string(&resolved) {
                 Ok(d) => d,
                 Err(e) => {
-                    emit_multiline_dedent_error(e, span, 3, 3, emit);
+                    emit_multiline_dedent_error(remap(e, &map), span, 3, 3, emit);
                     return "".into();
                 }
             };
@@ -571,7 +628,10 @@ fn multi_line_quoted_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, 
                     let newlines_before_end = dedented[..end].matches('\n').count();
                     let content_start = 1 + indent_len + start + newlines_before_start * indent_len;
                     let content_end = 1 + indent_len + end + newlines_before_end * indent_len;
-                    let error_span = Span(span.0 + content_start, span.0 + content_end);
+                    let error_span = Span(
+                        span.0 + map_offset(&map, content_start),
+                        span.0 + map_offset(&map, content_end),
+                    );
                     emit.emit(ParseError::Message {
                         label: Some("invalid escape sequence"),
                         span: error_span,
@@ -657,9 +717,13 @@ fn raw_string_quotes<'src>()
                 let span = Span::from(extras.span());
                 let hash_num = *extras.ctx();
 
-                match dedent_multiline_string(content) {
+                // A raw string has no escapes, so only newline normalization
+                // stands between its source text and the dedent.
+                let (resolved, map) = resolve_ws_escapes(content, true);
+                match dedent_multiline_string(&resolved) {
                     Ok((dedented, _indent_len)) => dedented.into(),
                     Err(e) => {
+                        let e = remap(e, &map);
                         emit_multiline_dedent_error(e, span, hash_num + 3, 3 + hash_num, emit);
                         "".into()
                     }
@@ -668,10 +732,12 @@ fn raw_string_quotes<'src>()
     );
 
     // Single-line: "..."
+    // single-line-raw-string-char := unicode - newline
     let single_line = just('"')
         .then_ignore(just("\"\"").not().rewind())
         .ignore_then(
             any()
+                .filter(|c: &char| !is_newline_char(c))
                 .and_is(just('"').then(matching_hashes).not())
                 .repeated()
                 .to_slice()
@@ -939,7 +1005,7 @@ fn is_newline_char(c: &char) -> bool {
 
 // line-space := node-space | newline | single-line-comment
 fn line_space<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
-    newline().or(ws()).or(single_line_comment())
+    newline().or(ws()).or(single_line_comment()).or(escline())
 }
 
 // node-space := ws* escline ws* | ws+
@@ -992,26 +1058,87 @@ fn make_spanned<'src, T>(
 
 // --- Helper functions for multi-line strings ---
 
-/// Normalize newlines: convert all newline variants to LF
-fn normalize_newlines(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
+/// Normalize literal newlines to LF and discard whitespace escapes, returning
+/// the result along with a map from each of its bytes back to the byte of `s`
+/// that byte came from (plus one final entry for the end).
+///
+/// Both of those steps move the text around, so an error found afterwards --
+/// in the dedent, or in the escapes that are left -- needs the map to point at
+/// the right place in the source. `raw` turns off the escape handling for raw
+/// strings, which have none.
+fn resolve_ws_escapes(s: &str, raw: bool) -> (String, Vec<usize>) {
+    fn keep(out: &mut String, map: &mut Vec<usize>, at: usize, c: char) {
+        for _ in 0..c.len_utf8() {
+            map.push(at);
+        }
+        out.push(c);
+    }
+    fn is_escapable_ws(c: char) -> bool {
+        is_kdl_ws(c) || is_newline_char(&c)
+    }
+
+    let mut out = String::with_capacity(s.len());
+    let mut map = Vec::with_capacity(s.len() + 1);
+    let mut chars = s.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
         match c {
+            // CRLF and CR alike collapse to a single LF, as do the other
+            // literal newlines. Newlines written as `\n` are left alone.
             '\r' => {
-                // CRLF or CR -> LF
-                if chars.peek() == Some(&'\n') {
+                if chars.peek().is_some_and(|&(_, next)| next == '\n') {
                     chars.next();
                 }
-                result.push('\n');
+                map.push(i);
+                out.push('\n');
             }
-            '\x0C' | '\x0B' | '\u{0085}' | '\u{2028}' | '\u{2029}' => {
-                result.push('\n');
+            '\x0B' | '\x0C' | '\u{0085}' | '\u{2028}' | '\u{2029}' => {
+                map.push(i);
+                out.push('\n');
             }
-            _ => result.push(c),
+            '\\' if !raw => match chars.peek() {
+                // ws-escape := '\\' (unicode-space | newline)+ -- dropped whole.
+                Some(&(_, next)) if is_escapable_ws(next) => {
+                    while chars.peek().is_some_and(|&(_, n)| is_escapable_ws(n)) {
+                        chars.next();
+                    }
+                }
+                // Every other escape is copied over as a unit, so that the
+                // second `\` of `\\` cannot start a whitespace escape.
+                Some(&(j, next)) => {
+                    chars.next();
+                    keep(&mut out, &mut map, i, '\\');
+                    keep(&mut out, &mut map, j, next);
+                }
+                None => keep(&mut out, &mut map, i, '\\'),
+            },
+            _ => keep(&mut out, &mut map, i, c),
         }
     }
-    result
+    map.push(s.len());
+    (out, map)
+}
+
+/// Translate an offset into the string `resolve_ws_escapes` produced back into
+/// an offset in the text it was given.
+fn map_offset(map: &[usize], offset: usize) -> usize {
+    map.get(offset)
+        .or_else(|| map.last())
+        .copied()
+        .unwrap_or(offset)
+}
+
+/// The same translation, for the offsets a dedent error carries.
+fn remap(e: MultilineStringError, map: &[usize]) -> MultilineStringError {
+    match e {
+        MultilineStringError::InsufficientIndent { offset, length } => {
+            let start = map_offset(map, offset);
+            MultilineStringError::InsufficientIndent {
+                offset: start,
+                length: map_offset(map, offset + length) - start,
+            }
+        }
+        other => other,
+    }
 }
 
 /// Check if a character is a KDL whitespace character
@@ -1065,9 +1192,9 @@ fn emit_multiline_dedent_error(
 }
 
 /// Dedent a multi-line string based on the closing line's whitespace prefix.
-fn dedent_multiline_string(s: &str) -> Result<(String, usize), MultilineStringError> {
-    let normalized = normalize_newlines(s);
-
+/// Takes the string as `resolve_ws_escapes` left it, so newlines are already
+/// LF and no whitespace escape remains to be mistaken for content.
+fn dedent_multiline_string(normalized: &str) -> Result<(String, usize), MultilineStringError> {
     let last_newline_pos = match normalized.rfind('\n') {
         Some(pos) => pos,
         None => {
@@ -1196,6 +1323,10 @@ fn process_escapes(s: &str) -> Result<String, (usize, usize, String)> {
                         }
                     }
                 }
+                // A whitespace escape discards the `\` and the whitespace and
+                // leaves nothing in its place. For a multi-line string these
+                // are already gone by now, since they have to be resolved
+                // before the dedent.
                 Some((_, c)) if c == ' ' || c == '\t' || c == '\n' || is_kdl_ws(c) => {
                     while let Some(&(_, next)) = chars.peek() {
                         if next == ' ' || next == '\t' || next == '\n' || is_kdl_ws(next) {
@@ -1204,7 +1335,6 @@ fn process_escapes(s: &str) -> Result<String, (usize, usize, String)> {
                             break;
                         }
                     }
-                    result.push(' ');
                 }
                 Some((j, c)) => {
                     return Err((
@@ -2105,7 +2235,10 @@ mod test {
 
     #[test]
     fn parse_multiline_str_err_trailing_backslash() {
-        // Trailing backslash at end of content - spans just the backslash
+        // A backslash at the end of the last content line escapes the newline
+        // that the closing delimiter needs to have in front of it, leaving
+        // `"""` on the same line as `hello` -- which the spec calls out as
+        // illegal. The span is the closing delimiter that ended up misplaced.
         err_eq!(
             parse(string(), "\"\"\"\nhello\\\n\"\"\""),
             r#"{
@@ -2113,12 +2246,13 @@ mod test {
             "severity": "error",
             "labels": [],
             "related": [{
-                "message": "trailing backslash",
+                "message":
+                    "closing delimiter must be on its own line with only whitespace prefix",
                 "severity": "error",
                 "filename": "<test>",
                 "labels": [
-                    {"label": "invalid escape sequence",
-                    "span": {"offset": 9, "length": 1}}
+                    {"label": "must be on its own line",
+                    "span": {"offset": 11, "length": 3}}
                 ],
                 "related": []
             }]
@@ -2855,7 +2989,7 @@ mod test {
             "severity": "error",
             "labels": [],
             "related": [{
-                "message": "found `=`, expected `\"`, `#`, `(`, `+`, `-`, `.`, `0`, `;`, `\\`, `{`, `#-inf`, `#false`, `#inf`, `#nan`, `#null`, `#true`, letter, newline, whitespace or end of input",
+                "message": "found `=`, expected `\"`, `#`, `(`, `+`, `-`, `.`, `0`, `;`, `\\`, `{`, `}`, `#-inf`, `#false`, `#inf`, `#nan`, `#null`, `#true`, letter, newline, whitespace or end of input",
                 "severity": "error",
                 "filename": "<test>",
                 "labels": [
