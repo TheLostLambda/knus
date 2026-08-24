@@ -1,7 +1,4 @@
-error: decode modes are not supported on children
-
-         = help: try putting decode mode into unwrap(.., str)
-
+error: decode modes are not supported on children; try putting decode mode into unwrap(.., str)
  --> tests/errors/decode-mode-not-supported-try-unwrap.rs:3:12
   |
 3 |     #[knus(str, child, unwrap())]
