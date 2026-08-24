@@ -27,3 +27,4 @@ proc-macro-error2 = "2.0.1"
 [dev-dependencies]
 knus = { path=".." }
 miette = { version="7.6.0", features=["fancy"] }
+trybuild = "1.0.120"

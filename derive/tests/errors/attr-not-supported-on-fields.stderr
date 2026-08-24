@@ -1,0 +1,5 @@
+error: this attribute is not supported on fields
+ --> tests/errors/attr-not-supported-on-fields.rs:3:12
+  |
+3 |     #[knus(skip)]
+  |            ^^^^

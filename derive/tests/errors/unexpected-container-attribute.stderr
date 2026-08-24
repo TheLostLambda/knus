@@ -1,0 +1,5 @@
+error: unexpected container attribute
+ --> tests/errors/unexpected-container-attribute.rs:2:8
+  |
+2 | #[knus(skip)]
+  |        ^^^^

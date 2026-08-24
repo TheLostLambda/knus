@@ -1,0 +1,5 @@
+error: not supported on enum variants
+ --> tests/errors/attr-not-supported-on-variants.rs:3:12
+  |
+3 |     #[knus(child)]
+  |            ^^^^^

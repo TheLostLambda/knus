@@ -1,0 +1,5 @@
+error: `unwrap` specified twice
+ --> tests/errors/unwrap-specified-twice.rs:3:22
+  |
+3 |     #[knus(unwrap(), unwrap())]
+  |                      ^^^^^^
