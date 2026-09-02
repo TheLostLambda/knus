@@ -681,7 +681,7 @@ mod test {
                     .render_report(&mut buf, &e)
                     .unwrap();
                 println!("{}", buf);
-                buf.truncate(0);
+                buf.clear();
                 miette::JSONReportHandler::new()
                     .render_report(&mut buf, &e)
                     .unwrap();

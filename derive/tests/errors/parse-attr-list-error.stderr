@@ -1,0 +1,5 @@
+error: expected one of: `argument`, `arguments`, `property`, `properties`, `children`, `child`, `unwrap`, `skip`, `str`, `bytes`, `flatten`, `default`, `span`, `node_name`, `type_name`, `span_type`
+ --> tests/errors/parse-attr-list-error.rs:3:12
+  |
+3 |     #[knus(error)]
+  |            ^^^^^

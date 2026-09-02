@@ -1,0 +1,5 @@
+error: only single attribute that defines mode of the field is allowed. Perhaps you mean `unwrap`?
+ --> tests/errors/perhaps-you-mean-unwrap.rs:3:22
+  |
+3 |     #[knus(argument, argument)]
+  |                      ^^^^^^^^

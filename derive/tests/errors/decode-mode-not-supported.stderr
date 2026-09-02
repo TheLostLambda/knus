@@ -1,0 +1,5 @@
+error: decode modes are not supported on children
+ --> tests/errors/decode-mode-not-supported.rs:3:12
+  |
+3 |     #[knus(str, child)]
+  |            ^^^

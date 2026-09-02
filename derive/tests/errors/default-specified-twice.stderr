@@ -1,0 +1,5 @@
+error: only single default is allowed
+ --> tests/errors/default-specified-twice.rs:3:21
+  |
+3 |     #[knus(default, default)]
+  |                     ^^^^^^^

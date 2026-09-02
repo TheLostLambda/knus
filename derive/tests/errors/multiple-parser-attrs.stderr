@@ -1,0 +1,5 @@
+error: only single attribute that defines parser of the field is allowed
+ --> tests/errors/multiple-parser-attrs.rs:3:17
+  |
+3 |     #[knus(str, bytes)]
+  |                 ^^^^^

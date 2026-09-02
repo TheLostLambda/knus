@@ -1,7 +1,6 @@
 use std::fmt;
 use std::mem;
 
-use proc_macro_error2::emit_error;
 use proc_macro2::{Span, TokenStream};
 use quote::quote;
 use syn::ext::IdentExt;
@@ -280,18 +279,16 @@ impl Enum {
         generics: syn::Generics,
         src_variants: impl Iterator<Item = syn::Variant>,
     ) -> syn::Result<Self> {
-        let mut attrs = parse_attr_list(&attrs);
+        let mut attrs = parse_attr_list(&attrs)?;
         let trait_props = TraitProps::pick_from(&mut attrs);
-        if !attrs.is_empty() {
-            for (_, span) in attrs {
-                emit_error!(span, "unexpected container attribute");
-            }
+        if let Some((_, span)) = attrs.into_iter().next() {
+            return Err(syn::Error::new(span, "unexpected container attribute"));
         }
 
         let mut variants = Vec::new();
         for var in src_variants {
             let mut attrs = VariantAttrs::new();
-            attrs.update(parse_attr_list(&var.attrs));
+            attrs.update(parse_attr_list(&var.attrs)?)?;
             if attrs.skip {
                 continue;
             }
@@ -478,7 +475,7 @@ impl StructBuilder {
                 });
             }
             Some(FieldMode::Child) => {
-                attrs.no_decode("children");
+                attrs.no_decode("children")?;
                 if let Some(prev) = &self.var_children {
                     return Err(err_pair(
                         &field,
@@ -512,7 +509,7 @@ impl StructBuilder {
                 });
             }
             Some(FieldMode::Children { name: Some(name) }) => {
-                attrs.no_decode("children");
+                attrs.no_decode("children")?;
                 if let Some(prev) = &self.var_children {
                     return Err(err_pair(
                         &field,
@@ -531,7 +528,7 @@ impl StructBuilder {
                 });
             }
             Some(FieldMode::Children { name: None }) => {
-                attrs.no_decode("children");
+                attrs.no_decode("children")?;
                 if let Some(prev) = &self.var_children {
                     return Err(err_pair(
                         &field,
@@ -552,7 +549,7 @@ impl StructBuilder {
                         "optional flatten fields are not supported yet",
                     ));
                 }
-                attrs.no_decode("children");
+                attrs.no_decode("children")?;
                 if flatten.property {
                     if let Some(prev) = &self.var_props {
                         return Err(err_pair(
@@ -593,15 +590,15 @@ impl StructBuilder {
                 }
             }
             Some(FieldMode::Span) => {
-                attrs.no_decode("span");
+                attrs.no_decode("span")?;
                 self.spans.push(SpanField { field });
             }
             Some(FieldMode::NodeName) => {
-                attrs.no_decode("node_name");
+                attrs.no_decode("node_name")?;
                 self.node_names.push(NodeNameField { field });
             }
             Some(FieldMode::TypeName) => {
-                attrs.no_decode("type_name");
+                attrs.no_decode("type_name")?;
                 self.type_names.push(TypeNameField {
                     field,
                     option: is_option,
@@ -629,7 +626,7 @@ impl Struct {
         let mut bld = StructBuilder::new(ident, trait_props, generics);
         for (idx, fld) in fields.enumerate() {
             let mut attrs = FieldAttrs::new();
-            attrs.update(parse_attr_list(&fld.attrs));
+            attrs.update(parse_attr_list(&fld.attrs)?)?;
             let field = Field::new(&fld, idx);
             bld.add_field(field, is_option(&fld.ty), is_bool(&fld.ty), &attrs)?;
         }
@@ -663,12 +660,10 @@ impl Parse for Definition {
             let item: syn::ItemStruct = input.parse()?;
             attrs.extend(item.attrs);
 
-            let mut attrs = parse_attr_list(&attrs);
+            let mut attrs = parse_attr_list(&attrs)?;
             let trait_props = TraitProps::pick_from(&mut attrs);
-            if !attrs.is_empty() {
-                for (_, span) in attrs {
-                    emit_error!(span, "unexpected container attribute");
-                }
+            if let Some((_, span)) = attrs.into_iter().next() {
+                return Err(syn::Error::new(span, "unexpected container attribute"));
             }
 
             match item.fields {
@@ -720,60 +715,72 @@ impl FieldAttrs {
             default: None,
         }
     }
-    fn update(&mut self, attrs: impl IntoIterator<Item = (Attr, Span)>) {
+    fn update(&mut self, attrs: impl IntoIterator<Item = (Attr, Span)>) -> syn::Result<()> {
         use Attr::*;
 
         for (attr, span) in attrs {
             match attr {
                 FieldMode(mode) => {
                     if self.mode.is_some() {
-                        emit_error!(
+                        return Err(syn::Error::new(
                             span,
                             "only single attribute that defines mode of the \
-                            field is allowed. Perhaps you mean `unwrap`?"
-                        );
+                            field is allowed. Perhaps you mean `unwrap`?",
+                        ));
                     }
                     self.mode = Some(mode);
                 }
                 Unwrap(val) => {
                     if self.unwrap.is_some() {
-                        emit_error!(span, "`unwrap` specified twice");
+                        return Err(syn::Error::new(span, "`unwrap` specified twice"));
                     }
                     self.unwrap = Some(Box::new(val));
                 }
                 DecodeMode(mode) => {
                     if self.decode.is_some() {
-                        emit_error!(
+                        return Err(syn::Error::new(
                             span,
                             "only single attribute that defines parser of the \
-                            field is allowed"
-                        );
+                            field is allowed",
+                        ));
                     }
                     self.decode = Some((mode, span));
                 }
                 Default(value) => {
                     if self.default.is_some() {
-                        emit_error!(span, "only single default is allowed");
+                        return Err(syn::Error::new(span, "only single default is allowed"));
                     }
                     self.default = Some(value);
                 }
-                _ => emit_error!(span, "this attribute is not supported on fields"),
+                _ => {
+                    return Err(syn::Error::new(
+                        span,
+                        "this attribute is not supported on fields",
+                    ));
+                }
             }
         }
+        Ok(())
     }
 
-    fn no_decode(&self, element: &str) {
+    fn no_decode(&self, element: &str) -> syn::Result<()> {
         if let Some((mode, span)) = self.decode.as_ref() {
             if self.unwrap.is_some() {
-                emit_error!(span,
-                    "decode modes are not supported on {}", element;
-                    hint= (*span) => "try putting decode mode \
-                                          into unwrap(.., {})", mode;
-                );
+                return Err(syn::Error::new(
+                    *span,
+                    format!(
+                        "decode modes are not supported on {}; try putting decode mode into unwrap(.., {})",
+                        element, mode,
+                    ),
+                ));
             } else {
-                emit_error!(span, "decode modes are not supported on {}", element);
+                return Err(syn::Error::new(
+                    *span,
+                    format!("decode modes are not supported on {}", element),
+                ));
             }
         }
+        Ok(())
     }
 }
 
@@ -781,29 +788,27 @@ impl VariantAttrs {
     fn new() -> VariantAttrs {
         VariantAttrs { skip: false }
     }
-    fn update(&mut self, attrs: impl IntoIterator<Item = (Attr, Span)>) {
+    fn update(&mut self, attrs: impl IntoIterator<Item = (Attr, Span)>) -> syn::Result<()> {
         use Attr::*;
 
         for (attr, span) in attrs {
             match attr {
                 Skip => self.skip = true,
-                _ => emit_error!(span, "not supported on enum variants"),
+                _ => return Err(syn::Error::new(span, "not supported on enum variants")),
             }
         }
+        Ok(())
     }
 }
 
-fn parse_attr_list(attrs: &[syn::Attribute]) -> Vec<(Attr, Span)> {
+fn parse_attr_list(attrs: &[syn::Attribute]) -> syn::Result<Vec<(Attr, Span)>> {
     let mut all = Vec::new();
     for attr in attrs {
         if matches!(attr.style, syn::AttrStyle::Outer) && attr.path().is_ident("knus") {
-            match attr.parse_args_with(parse_attrs) {
-                Ok(attrs) => all.extend(attrs),
-                Err(e) => emit_error!(e),
-            }
+            all.extend(attr.parse_args_with(parse_attrs)?);
         }
     }
-    all
+    Ok(all)
 }
 
 fn parse_attrs(input: ParseStream) -> syn::Result<impl IntoIterator<Item = (Attr, Span)> + use<>> {
@@ -869,7 +874,7 @@ impl Attr {
             syn::parenthesized!(parens in input);
             let mut attrs = FieldAttrs::new();
             let chunk = parens.call(parse_attrs)?;
-            attrs.update(chunk);
+            attrs.update(chunk)?;
             Ok(Attr::Unwrap(attrs))
         } else if lookahead.peek(kw::skip) {
             let _kw: kw::skip = input.parse()?;
