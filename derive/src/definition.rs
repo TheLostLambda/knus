@@ -281,10 +281,8 @@ impl Enum {
     ) -> syn::Result<Self> {
         let mut attrs = parse_attr_list(&attrs)?;
         let trait_props = TraitProps::pick_from(&mut attrs);
-        if !attrs.is_empty() {
-            for (_, span) in attrs {
-                return Err(syn::Error::new(span, "unexpected container attribute"));
-            }
+        if let Some((_, span)) = attrs.into_iter().next() {
+            return Err(syn::Error::new(span, "unexpected container attribute"));
         }
 
         let mut variants = Vec::new();
@@ -664,10 +662,8 @@ impl Parse for Definition {
 
             let mut attrs = parse_attr_list(&attrs)?;
             let trait_props = TraitProps::pick_from(&mut attrs);
-            if !attrs.is_empty() {
-                for (_, span) in attrs {
-                    return Err(syn::Error::new(span, "unexpected container attribute"));
-                }
+            if let Some((_, span)) = attrs.into_iter().next() {
+                return Err(syn::Error::new(span, "unexpected container attribute"));
             }
 
             match item.fields {
