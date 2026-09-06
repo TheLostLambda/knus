@@ -221,6 +221,72 @@ pub(crate) fn decode_enum_item(
     })
 }
 
+fn decode_str(
+    val: &syn::Ident,
+    ctx: &syn::Ident,
+    optional: bool,
+    decode_with: Option<&syn::ExprPath>
+) -> syn::Result<TokenStream> {
+    let decode_with = decode_with
+        .map(syn::ExprPath::to_token_stream)
+        .unwrap_or_else(|| quote![ ::std::str::FromStr::from_str ]);
+
+    if optional {
+        Ok(quote![{
+            if let Some(typ) = &#val.type_name {
+                #ctx.emit_error(::knus::errors::DecodeError::TypeName {
+                    span: typ.span().clone(),
+                    found: Some((**typ).clone()),
+                    expected: ::knus::errors::ExpectedType::no_type(),
+                    rust_type: "str", // TODO(tailhook) show field type
+                });
+            }
+            match *#val.literal {
+                ::knus::ast::Literal::String(ref s) => {
+                    #decode_with(s).map_err(|e| {
+                        ::knus::errors::DecodeError::conversion(
+                            &#val.literal, e)
+                    })
+                    .map(Some)
+                }
+                ::knus::ast::Literal::Null => Ok(None),
+                _ => {
+                    #ctx.emit_error(
+                        ::knus::errors::DecodeError::scalar_kind(
+                            ::knus::decode::Kind::String,
+                            &#val.literal,
+                        )
+                    );
+                    Ok(None)
+                }
+            }
+        }])
+    } else {
+        Ok(quote![{
+            if let Some(typ) = &#val.type_name {
+                #ctx.emit_error(::knus::errors::DecodeError::TypeName {
+                    span: typ.span().clone(),
+                    found: Some((**typ).clone()),
+                    expected: ::knus::errors::ExpectedType::no_type(),
+                    rust_type: "str", // TODO(tailhook) show field type
+                });
+            }
+            match *#val.literal {
+                ::knus::ast::Literal::String(ref s) => {
+                    #decode_with(s).map_err(|e| {
+                        ::knus::errors::DecodeError::conversion(
+                            &#val.literal, e)
+                    })
+                }
+                _ => Err(::knus::errors::DecodeError::scalar_kind(
+                    ::knus::decode::Kind::String,
+                    &#val.literal,
+                )),
+            }
+        }])
+    }
+}
+
 fn decode_value(
     val: &syn::Ident,
     ctx: &syn::Ident,
@@ -231,61 +297,8 @@ fn decode_value(
         DecodeMode::Normal => Ok(quote! {
             ::knus::traits::DecodeScalar::decode(#val, #ctx)
         }),
-        DecodeMode::Str if optional => {
-            Ok(quote![{
-                if let Some(typ) = &#val.type_name {
-                    #ctx.emit_error(::knus::errors::DecodeError::TypeName {
-                        span: typ.span().clone(),
-                        found: Some((**typ).clone()),
-                        expected: ::knus::errors::ExpectedType::no_type(),
-                        rust_type: "str", // TODO(tailhook) show field type
-                    });
-                }
-                match *#val.literal {
-                    ::knus::ast::Literal::String(ref s) => {
-                        ::std::str::FromStr::from_str(s).map_err(|e| {
-                            ::knus::errors::DecodeError::conversion(
-                                &#val.literal, e)
-                        })
-                        .map(Some)
-                    }
-                    ::knus::ast::Literal::Null => Ok(None),
-                    _ => {
-                        #ctx.emit_error(
-                            ::knus::errors::DecodeError::scalar_kind(
-                                ::knus::decode::Kind::String,
-                                &#val.literal,
-                            )
-                        );
-                        Ok(None)
-                    }
-                }
-            }])
-        }
-        DecodeMode::Str => {
-            Ok(quote![{
-                if let Some(typ) = &#val.type_name {
-                    #ctx.emit_error(::knus::errors::DecodeError::TypeName {
-                        span: typ.span().clone(),
-                        found: Some((**typ).clone()),
-                        expected: ::knus::errors::ExpectedType::no_type(),
-                        rust_type: "str", // TODO(tailhook) show field type
-                    });
-                }
-                match *#val.literal {
-                    ::knus::ast::Literal::String(ref s) => {
-                        ::std::str::FromStr::from_str(s).map_err(|e| {
-                            ::knus::errors::DecodeError::conversion(
-                                &#val.literal, e)
-                        })
-                    }
-                    _ => Err(::knus::errors::DecodeError::scalar_kind(
-                        ::knus::decode::Kind::String,
-                        &#val.literal,
-                    )),
-                }
-            }])
-        }
+        DecodeMode::Str =>
+            decode_str(val, ctx, optional, None),
         DecodeMode::Bytes if optional => Ok(quote! {
             if matches!(&*#val.literal, ::knus::ast::Literal::Null) {
                 Ok(None)
@@ -306,6 +319,8 @@ fn decode_value(
             .map_err(|e| ::knus::errors::DecodeError::conversion(
                     &#val.literal, e))
         }),
+        DecodeMode::With(path) =>
+            decode_str(val, ctx, optional, Some(&path)),
     }
 }
 

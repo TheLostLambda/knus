@@ -202,6 +202,7 @@ There are additional attributes that define how scalar values are parsed:
 * `bytes` -- decodes binary strings, either by decoding `base64` if the `(base64)` type is specified in the source or by encoding string into `utf-8` if no type is specified. This is required since
 * `default` -- described in [Common Attrbites](#common-attributes) section
   since it applies to nodes (non-scalar values) too.
+* `decode_with` -- similar to `str`, but rather than [`FromStr`](std::str::FromStr), takes a path to a custom decode function
 
 All of them work on [properties](#properties) and [arguments](#arguments).
 
@@ -257,6 +258,24 @@ example
 [`bstr::BString`](https://docs.rs/bstr/latest/bstr/struct.BString.html) and
 [`bytes::Bytes`](https://docs.rs/bytes/latest/bytes/struct.Bytes.html) work too.
 
+
+## Custom `decode_with`
+
+`decode_with` is somewhat analogous to serde's `deserialize_with` attribute:
+
+```rust
+fn decode_duration_seconds(s: &str) -> Result<std::time::Duration, std::num::ParseIntError>
+{
+    s.parse::<u64>()
+        .map(std::time::Duration::from_secs)
+}
+
+#[derive(knus_derive::Decode)]
+struct DecodeWith {
+    #[knus(child, unwrap(argument, decode_with = decode_duration_seconds))]
+    duration: std::time::Duration,
+}
+```
 
 # Children
 
