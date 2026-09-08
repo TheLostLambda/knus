@@ -359,35 +359,28 @@ fn quoted_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Cl
 fn identifier_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
     // dotted-ident is tried before signed-ident: on `+.`, signed-ident would
     // match the `+` alone and leave the `.` behind.
-    choice((
-        // unambiguous-ident: (identifier-char - digit - sign - '.') identifier-char*
-        unambiguous_ident(),
-        // dotted-ident: sign? '.' ((identifier-char - digit) identifier-char*)?
-        dotted_ident(),
-        // signed-ident: sign ((identifier-char - digit - '.') identifier-char*)?
-        signed_ident(),
-    ))
-    .map(|v: &str| Box::<str>::from(v))
-    .try_map(|s, span| {
-        // disallowed-keyword-identifiers
-        const KEYWORDS: [&str; 6] = ["#true", "#false", "#null", "#nan", "#inf", "#-inf"];
-        match &s[..] {
-            "true" | "false" | "null" | "nan" | "inf" | "-inf" => Err(ParseError::Message {
-                label: Some("illegal identifier"),
-                span: span.into(),
-                message: format!("`{s}` is not allowed as a bare string"),
-            }),
-            _ => match KEYWORDS.iter().find(|&&kw| kw == &s[..]) {
-                Some(&kw) => Err(ParseError::Unexpected {
-                    label: Some("keyword"),
+    choice((unambiguous_ident(), dotted_ident(), signed_ident()))
+        .map(|v: &str| Box::<str>::from(v))
+        .try_map(|s, span| {
+            // disallowed-keyword-identifiers
+            const KEYWORDS: [&str; 6] = ["#true", "#false", "#null", "#nan", "#inf", "#-inf"];
+            match &s[..] {
+                "true" | "false" | "null" | "nan" | "inf" | "-inf" => Err(ParseError::Message {
+                    label: Some("illegal identifier"),
                     span: span.into(),
-                    found: TokenFormat::Token(kw),
-                    expected: expected_kind("identifier"),
+                    message: format!("`{s}` is not allowed as a bare string"),
                 }),
-                None => Ok(s),
-            },
-        }
-    })
+                _ => match KEYWORDS.iter().find(|&&kw| kw == &s[..]) {
+                    Some(&kw) => Err(ParseError::Unexpected {
+                        label: Some("keyword"),
+                        span: span.into(),
+                        found: TokenFormat::Token(kw),
+                        expected: expected_kind("identifier"),
+                    }),
+                    None => Ok(s),
+                },
+            }
+        })
 }
 
 // unambiguous-ident := (identifier-char - digit - sign - '.') identifier-char*
@@ -585,9 +578,9 @@ fn multi_line_quoted_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, 
         .repeated()
         .to_slice()
         .then_ignore(just("\"\"\""))
-        .validate(|content: &str, extras, emit| {
+        .validate(|body: &str, extras, emit| {
             let span = Span::from(extras.span());
-            match dedent_multiline_string(&MultilineBody::of_quoted(content)) {
+            match dedent_multiline_string(&MultilineBody::of_quoted(body)) {
                 Ok(dedented) => unescape(&dedented).into(),
                 Err(e) => {
                     emit_multiline_dedent_error(e, span, 3, 3, emit);
@@ -1192,31 +1185,30 @@ fn emit_multiline_dedent_error(
 ///
 /// The result still contains its non-whitespace escapes, if it has any.
 fn dedent_multiline_string(body: &MultilineBody) -> Result<String, MultilineStringError> {
-    let normalized = &body.text;
+    let text = &body.text;
 
-    let last_newline_pos = match normalized.rfind('\n') {
-        Some(pos) => pos,
-        None => return Err(MultilineStringError::NoOpeningNewline),
+    let Some(last_newline_pos) = text.rfind('\n') else {
+        return Err(MultilineStringError::NoOpeningNewline);
     };
 
-    let indent = &normalized[last_newline_pos + 1..];
+    let indent = &text[last_newline_pos + 1..];
     if !indent.chars().all(is_unicode_space) {
         return Err(MultilineStringError::ClosingNotOnOwnLine);
     }
 
     // The first and last newline may be one and the same: an empty string.
-    let before_last_newline = &normalized[..last_newline_pos];
-    if before_last_newline.is_empty() {
+    let lines = &text[..last_newline_pos];
+    if lines.is_empty() {
         return Ok(String::new());
     }
-    let Some(content) = before_last_newline.strip_prefix('\n') else {
+    let Some(lines) = lines.strip_prefix('\n') else {
         return Err(MultilineStringError::NoOpeningNewline);
     };
 
-    let mut result = String::with_capacity(content.len());
+    let mut result = String::with_capacity(lines.len());
     let mut line_start = 1; // offset of the current line in `text`
     let mut first = true;
-    for line in content.split('\n') {
+    for line in lines.split('\n') {
         if !first {
             result.push('\n');
         } else {
