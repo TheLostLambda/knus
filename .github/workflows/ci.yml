@@ -51,6 +51,26 @@ jobs:
         env:
           KNUS_KDL_TEST_CASES: ${{ github.workspace }}/kdl-spec/tests/test_cases
 
+  kdl_test:
+    name: KDL Test Suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: extractions/setup-just@v2
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Pinned so an upstream change to the suite cannot turn an unrelated PR
+      # red; bump it to pick up new cases.
+      - name: Install kdl-test
+        uses: jaxxstorm/action-install-gh-release@v3.0.0
+        with:
+          repo: kdl-org/kdl-test
+          tag: v0.2.0
+          cache: enable
+
+      - run: just kdl-test
+
   check_wasm_build:
     name: Check WASM Build
     runs-on: ubuntu-latest
