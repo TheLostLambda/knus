@@ -33,9 +33,6 @@ jobs:
   conformance:
     name: KDL Conformance Suite
     runs-on: ubuntu-latest
-    # TODO: drop this once the remaining conformance failures are fixed. Until
-    # then the job still runs and reports, but does not fail the workflow.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2

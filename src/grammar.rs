@@ -80,36 +80,39 @@ fn nodes<'src>() -> impl Parser<'src, Input<'src>, Vec<SpannedNode>, Error> + Cl
         //     (node-space* node-children)?
         //     (node-space* slashdash node-children)*
         //     node-space*
+        // (The leading `slashdash?` is matched by `nodes` below.)
+
+        // (node-space* slashdash node-children)*
+        let slashdashed_children = node_space()
+            .repeated()
+            .ignore_then(slashdash())
+            .ignore_then(braced_nodes.clone())
+            .repeated();
 
         let base_node = opt_type()
             .then(spanned(string_expecting_identifier()))
             .then(
-                node_space()
-                    .repeated()
-                    .at_least(1)
-                    .ignore_then(maybe_slashdash_node_prop_or_arg())
+                maybe_slashdash_node_prop_or_arg()
                     .repeated()
                     .collect::<Vec<PropOrArg>>(),
             )
+            // slashdashed node-children must always be after props and args.
+            .then_ignore(slashdashed_children.clone())
             .then(
                 node_space()
                     .repeated()
-                    .ignore_then(slashdash().then_ignore(line_space().repeated()).or_not())
-                    .then(spanned(braced_nodes))
+                    .ignore_then(spanned(braced_nodes))
                     .or_not(),
             )
+            .then_ignore(slashdashed_children)
             .then_ignore(node_space().repeated())
-            .map(|(((type_name, node_name), line_items), opt_children)| {
+            .map(|(((type_name, node_name), line_items), children)| {
                 let mut node = Node {
                     type_name,
                     node_name,
                     properties: BTreeMap::new(),
                     arguments: Vec::new(),
-                    children: match opt_children {
-                        Some((Some(_comment), _)) => None,
-                        Some((None, children)) => Some(children),
-                        None => None,
-                    },
+                    children,
                 };
                 for item in line_items {
                     match item {
@@ -131,7 +134,6 @@ fn nodes<'src>() -> impl Parser<'src, Input<'src>, Vec<SpannedNode>, Error> + Cl
 
         // nodes := (line-space* node)* line-space*
         slashdash()
-            .then_ignore(line_space().repeated())
             .or_not()
             .then(node)
             .separated_by(line_space().repeated())
@@ -157,13 +159,21 @@ enum PropOrArg {
     Ignore,
 }
 
-// (node-space | slashdash) node-prop-or-arg
-// Handles the slashdash alternative from base-node, returning PropOrArg::Ignore
-// for slashdashed entries.
+// node-space* (node-space | slashdash) node-prop-or-arg
+//
+// One entry of a node, with the whitespace before it; slashdashed entries
+// come back as `PropOrArg::Ignore`.
+// `node-prop-or-arg` requires at least one node-space before it, but slashdash does not.
 fn maybe_slashdash_node_prop_or_arg<'src>()
 -> impl Parser<'src, Input<'src>, PropOrArg, Error> + Clone {
-    slashdash()
-        .or_not()
+    // `node-space* node-space` is just `node-space+`, hence the `at_least(1)`.
+    // The two grammar alternatives then collapse into `node-space+` with an
+    // optional slashdash, or a slashdash with no whitespace before it.
+    node_space()
+        .repeated()
+        .at_least(1)
+        .ignore_then(slashdash().or_not())
+        .or(slashdash().map(Some))
         .then(node_prop_or_arg())
         .map(|(slashdashed, item)| match slashdashed {
             Some(()) => PropOrArg::Ignore,
@@ -250,8 +260,28 @@ fn node_prop_or_arg<'src>() -> impl Parser<'src, Input<'src>, PropOrArg, Error> 
 }
 
 // node-terminator := single-line-comment | newline | ';' | eof
+//
+// The grammar treats the last node in a children block differently: `node-children := '{' nodes
+// final-node? '}'`. In the final node, the terminator is optional. This is what allows `parent {
+// child }` rather than forcing `parent { child; }`. But doing this naively would mean naming
+// `base-node` (the largest parser here) a second time. Instead, every node keeps its mandatory
+// terminator and a `}` is accepted as one.
+//
+// The brace is matched but left unconsumed, so `braced_nodes` still sees it and can close the
+// block.
+//
+// `with_no_expected` keeps this branch out of the "expected ..." list.
 fn node_terminator<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
-    choice((newline(), single_line_comment(), just(';').ignored(), end()))
+    choice((
+        newline(),
+        single_line_comment(),
+        just(';').ignored(),
+        end(),
+        just('}')
+            .map_err(|e: ParseError| e.with_no_expected())
+            .rewind()
+            .ignored(),
+    ))
 }
 
 // value := type? node-space* (string | number | keyword)
@@ -327,35 +357,30 @@ fn quoted_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Cl
 //     (unambiguous-ident | signed-ident | dotted-ident)
 //     - disallowed-keyword-identifiers
 fn identifier_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
-    choice((
-        // unambiguous-ident: (identifier-char - digit - sign - '.') identifier-char*
-        unambiguous_ident(),
-        // signed-ident: sign ((identifier-char - digit - '.') identifier-char*)?
-        signed_ident(),
-        // dotted-ident: sign? '.' ((identifier-char - digit) identifier-char*)?
-        dotted_ident(),
-    ))
-    .map(|v: &str| Box::<str>::from(v))
-    .try_map(|s, span| {
-        // disallowed-keyword-identifiers
-        const KEYWORDS: [&str; 6] = ["#true", "#false", "#null", "#nan", "#inf", "#-inf"];
-        match &s[..] {
-            "true" | "false" | "null" | "nan" | "inf" | "-inf" => Err(ParseError::Message {
-                label: Some("illegal identifier"),
-                span: span.into(),
-                message: format!("`{s}` is not allowed as a bare string"),
-            }),
-            _ => match KEYWORDS.iter().find(|&&kw| kw == &s[..]) {
-                Some(&kw) => Err(ParseError::Unexpected {
-                    label: Some("keyword"),
+    // dotted-ident is tried before signed-ident: on `+.`, signed-ident would
+    // match the `+` alone and leave the `.` behind.
+    choice((unambiguous_ident(), dotted_ident(), signed_ident()))
+        .map(|v: &str| Box::<str>::from(v))
+        .try_map(|s, span| {
+            // disallowed-keyword-identifiers
+            const KEYWORDS: [&str; 6] = ["#true", "#false", "#null", "#nan", "#inf", "#-inf"];
+            match &s[..] {
+                "true" | "false" | "null" | "nan" | "inf" | "-inf" => Err(ParseError::Message {
+                    label: Some("illegal identifier"),
                     span: span.into(),
-                    found: TokenFormat::Token(kw),
-                    expected: expected_kind("identifier"),
+                    message: format!("`{s}` is not allowed as a bare string"),
                 }),
-                None => Ok(s),
-            },
-        }
-    })
+                _ => match KEYWORDS.iter().find(|&&kw| kw == &s[..]) {
+                    Some(&kw) => Err(ParseError::Unexpected {
+                        label: Some("keyword"),
+                        span: span.into(),
+                        found: TokenFormat::Token(kw),
+                        expected: expected_kind("identifier"),
+                    }),
+                    None => Ok(s),
+                },
+            }
+        })
 }
 
 // unambiguous-ident := (identifier-char - digit - sign - '.') identifier-char*
@@ -394,118 +419,114 @@ fn sign<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
 //     - disallowed-literal-code-points
 fn identifier_char<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
     any::<_, Error>()
-        .filter(is_identifier_char)
+        .filter(|c| is_identifier_char(*c))
         .map_err(|e: ParseError| e.with_expected_kind("letter"))
 }
 
-fn is_identifier_char(c: &char) -> bool {
-    !matches!(c,
-        // disallowed-literal-code-points (U+0000-0008, U+000E-001F)
-        // + unicode-space (U+0009 tab, U+0020 space)
-        // + newline (U+000A-000D)
-        '\u{0000}'..='\u{0020}' |
-        // [\\/(){};\[\]"#=]
-        '\\'|'/'|'('|')'|'{'|'}'|';'|'['|']'|'='|'"'|'#' |
-        // disallowed-literal-code-points: U+007F (Delete)
-        '\u{007F}' |
-        // newline: U+0085 (NEL)
-        '\u{0085}' |
-        // unicode-space
-        '\u{00a0}' | '\u{1680}' |
-        '\u{2000}'..='\u{200A}' |
-        // disallowed-literal-code-points: direction control characters
-        '\u{200E}'..='\u{200F}' |
-        '\u{202A}'..='\u{202E}' |
-        // unicode-space
-        '\u{202F}' | '\u{205F}' |
-        // disallowed-literal-code-points: direction control characters
-        '\u{2066}'..='\u{2069}' |
-        // newline: U+2028 (LS), U+2029 (PS)
-        '\u{2028}' | '\u{2029}' |
-        // unicode-space + disallowed-literal-code-points: U+FEFF (BOM)
-        '\u{3000}' | '\u{FEFF}'
-    )
+fn is_identifier_char(c: char) -> bool {
+    !is_unicode_space(c)
+        && !is_newline_char(c)
+        && !matches!(
+            c,
+            '\\' | '/' | '(' | ')' | '{' | '}' | ';' | '[' | ']' | '"' | '#' | '='
+        )
+        && !is_disallowed_literal_code_point(c)
 }
 
 // (identifier-char - digit)
 fn id_sans_dig<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
     any::<_, Error>()
-        .filter(|c| is_identifier_char(c) && !c.is_ascii_digit())
+        .filter(|c| is_identifier_char(*c) && !c.is_ascii_digit())
         .map_err(|e: ParseError| e.with_expected_kind("letter"))
 }
 
 // (identifier-char - digit - '.')
 fn id_sans_dig_point<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
     any::<_, Error>()
-        .filter(|c| is_identifier_char(c) && !c.is_ascii_digit() && *c != '.')
+        .filter(|c| is_identifier_char(*c) && !c.is_ascii_digit() && *c != '.')
         .map_err(|e: ParseError| e.with_expected_kind("letter"))
 }
 
 // (identifier-char - digit - sign - '.')
 fn id_sans_sign_dig_point<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
     any::<_, Error>()
-        .filter(|c| is_identifier_char(c) && !c.is_ascii_digit() && !matches!(c, '.' | '+' | '-'))
+        .filter(|c| is_identifier_char(*c) && !c.is_ascii_digit() && !matches!(c, '.' | '+' | '-'))
         .map_err(|e: ParseError| e.with_expected_kind("letter"))
 }
 
-// Single-line quoted string: '"' single-line-string-body '"'
+// '"' single-line-string-body '"'
+// single-line-string-body := (string-character - newline)*
 fn single_line_quoted_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
     // Single quote only - reject """ which is multi-line syntax
     just('"')
         .then_ignore(just("\"\"").not().rewind())
         .ignore_then(
-            choice((
-                none_of(['"', '\\']),
-                just('\\').ignore_then(escape()),
-                // ws-escape
-                just('\\')
-                    .then(unicode_space().or(newline()).repeated().at_least(1))
-                    .map(|_| ' '),
-            ))
-            .repeated()
-            .collect::<String>()
-            .then_ignore(just('"'))
-            .map(|val| val.into())
-            .map_err_with_state(|e: ParseError, span, _state| {
-                if matches!(
-                    &e,
-                    ParseError::Unexpected {
-                        found: TokenFormat::Eoi,
-                        ..
+            string_character()
+                .and_is(newline().not())
+                .repeated()
+                .to_slice()
+                .then_ignore(just('"'))
+                .map(|body| unescape(body).into())
+                .map_err_with_state(|e: ParseError, span, _state| {
+                    if matches!(
+                        &e,
+                        ParseError::Unexpected {
+                            found: TokenFormat::Eoi,
+                            ..
+                        }
+                    ) {
+                        e.merge(ParseError::Unclosed {
+                            label: "string",
+                            opened_at: Span::from(span).before_start(1),
+                            opened: '"'.into(),
+                            expected_at: Span::from(span).at_end(),
+                            expected: '"'.into(),
+                            found: None.into(),
+                        })
+                    } else {
+                        e
                     }
-                ) {
-                    e.merge(ParseError::Unclosed {
-                        label: "string",
-                        opened_at: Span::from(span).before_start(1),
-                        opened: '"'.into(),
-                        expected_at: Span::from(span).at_end(),
-                        expected: '"'.into(),
-                        found: None.into(),
-                    })
-                } else {
-                    e
-                }
-            }),
+                }),
         )
 }
 
-// string-character escape handling
+// string-character :=
+//     '\\' (["\\bfnrts] | 'u{' hex-unicode '}') |
+//     ws-escape |
+//     [^\\"] - disallowed-literal-code-points
+//
+// This only checks the character. A string's text is taken as a slice and
+// decoded afterwards by `unescape`, because a multi-line string has to be
+// dedented between resolving its whitespace escapes and resolving the rest.
+// Checking every escape here gives escape errors their exact source span.
+fn string_character<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
+    choice((
+        just('\\').ignore_then(escape()).ignored(),
+        ws_escape(),
+        any::<_, Error>()
+            .filter(|c| !matches!(c, '\\' | '"') && !is_disallowed_literal_code_point(*c))
+            .ignored(),
+    ))
+}
+
+// ws-escape := '\\' (unicode-space | newline)+
+fn ws_escape<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
+    just('\\')
+        .then(unicode_space().or(newline()).repeated().at_least(1))
+        .ignored()
+}
+
+// ["\\bfnrts] | 'u{' hex-unicode '}'
+// (the part of string-character after the `\`)
 fn escape<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
     any::<_, Error>()
-        .try_map(|c, span| match c {
-            '"' | '\\' => Ok(c),
-            'b' => Ok('\u{0008}'),
-            'f' => Ok('\u{000C}'),
-            'n' => Ok('\n'),
-            'r' => Ok('\r'),
-            't' => Ok('\t'),
-            's' => Ok(' '),
-            _ => Err(ParseError::Unexpected {
+        .try_map(|c, span| {
+            escape_char(c).ok_or_else(|| ParseError::Unexpected {
                 label: Some("invalid escape char"),
                 span: span.into(),
                 found: c.into(),
                 expected: "\"\\bfnrts".chars().map(|c| c.into()).collect(),
-            }),
+            })
         })
         .or(just('u').ignore_then(
             any::<_, Error>()
@@ -540,43 +561,29 @@ fn escape<'src>() -> impl Parser<'src, Input<'src>, char, Error> + Clone {
         ))
 }
 
-// Multi-line quoted string: '"""' newline ... '"""'
+// '"""' newline (multi-line-string-body newline)? (unicode-space | ws-escape)* '"""'
+// multi-line-string-body := ('"' ^'"' | '""' ^'"' | string-character)*?
+//
+// Everything up to the closing `"""` is scanned as multi-line-string-body.
+// The newline after the opening, the whitespace-only closing line and the
+// dedent are then checked on the text by `dedent_multiline_string`, since
+// which whitespace is the indent is only known once the closing line is seen.
 fn multi_line_quoted_string<'src>() -> impl Parser<'src, Input<'src>, Box<str>, Error> + Clone {
     just("\"\"\"").ignore_then(
-        // Capture raw content - one or two quotes are allowed, but not three
         choice((
-            // One double-quote that isn't followed by two more (not """)
-            just('"').then_ignore(just("\"\"").not().rewind()),
-            // Regular character (not quote)
-            none_of(['"']),
+            // A `"` is ordinary text unless it begins a closing `"""`
+            just('"').then_ignore(just("\"\"").not().rewind()).ignored(),
+            string_character(),
         ))
         .repeated()
         .to_slice()
         .then_ignore(just("\"\"\""))
-        .validate(|content: &str, extras, emit| {
+        .validate(|body: &str, extras, emit| {
             let span = Span::from(extras.span());
-
-            let (dedented, indent_len) = match dedent_multiline_string(content) {
-                Ok(d) => d,
+            match dedent_multiline_string(&MultilineBody::of_quoted(body)) {
+                Ok(dedented) => unescape(&dedented).into(),
                 Err(e) => {
                     emit_multiline_dedent_error(e, span, 3, 3, emit);
-                    return "".into();
-                }
-            };
-
-            match process_escapes(&dedented) {
-                Ok(processed) => processed.into(),
-                Err((start, end, msg)) => {
-                    let newlines_before_start = dedented[..start].matches('\n').count();
-                    let newlines_before_end = dedented[..end].matches('\n').count();
-                    let content_start = 1 + indent_len + start + newlines_before_start * indent_len;
-                    let content_end = 1 + indent_len + end + newlines_before_end * indent_len;
-                    let error_span = Span(span.0 + content_start, span.0 + content_end);
-                    emit.emit(ParseError::Message {
-                        label: Some("invalid escape sequence"),
-                        span: error_span,
-                        message: msg,
-                    });
                     "".into()
                 }
             }
@@ -626,8 +633,10 @@ fn raw_string_quotes<'src>()
         .configure(|cfg, hash_num| cfg.exactly(*hash_num));
 
     // Multi-line: """...""" (must be tried before single-line since """ starts with ")
+    // multi-line-raw-string-body := (unicode - disallowed-literal-code-points)*?
     let multi_line = just("\"\"\"").ignore_then(
         any()
+            .filter(|c| !is_disallowed_literal_code_point(*c))
             .and_is(just("\"\"\"").then(matching_hashes).not())
             .repeated()
             .to_slice()
@@ -653,12 +662,12 @@ fn raw_string_quotes<'src>()
                     e
                 }
             })
-            .validate(|(content, _): (&str, ()), extras, emit| {
+            .validate(|(body, _): (&str, ()), extras, emit| {
                 let span = Span::from(extras.span());
                 let hash_num = *extras.ctx();
 
-                match dedent_multiline_string(content) {
-                    Ok((dedented, _indent_len)) => dedented.into(),
+                match dedent_multiline_string(&MultilineBody::of_raw(body)) {
+                    Ok(dedented) => dedented.into(),
                     Err(e) => {
                         emit_multiline_dedent_error(e, span, hash_num + 3, 3 + hash_num, emit);
                         "".into()
@@ -668,10 +677,12 @@ fn raw_string_quotes<'src>()
     );
 
     // Single-line: "..."
+    // single-line-raw-string-char := unicode - newline - disallowed-literal-code-points
     let single_line = just('"')
         .then_ignore(just("\"\"").not().rewind())
         .ignore_then(
             any()
+                .filter(|c| !is_newline_char(*c) && !is_disallowed_literal_code_point(*c))
                 .and_is(just('"').then(matching_hashes).not())
                 .repeated()
                 .to_slice()
@@ -821,17 +832,30 @@ fn bom<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
     just('\u{FEFF}').ignored()
 }
 
-// unicode-space := See Table
+// disallowed-literal-code-points := See Table (Disallowed Literal Code Points)
+fn is_disallowed_literal_code_point(c: char) -> bool {
+    matches!(
+        c,
+        // control characters, including U+007F (Delete)
+        '\u{0000}'..='\u{0008}' | '\u{000E}'..='\u{001F}' | '\u{007F}' |
+        // direction control characters
+        '\u{200E}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' |
+        // BOM, allowed only as the first code point of a document
+        '\u{FEFF}'
+    )
+}
+
+// unicode-space := See Table (All White_Space unicode characters which are not `newline`)
 fn unicode_space<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
-    any::<_, Error>()
-        .filter(|c| {
-            matches!(
-                c,
-                '\t' | ' ' | '\u{00a0}' | '\u{1680}' | '\u{2000}'
-                    ..='\u{200A}' | '\u{202F}' | '\u{205F}' | '\u{3000}'
-            )
-        })
-        .ignored()
+    any::<_, Error>().filter(|c| is_unicode_space(*c)).ignored()
+}
+
+fn is_unicode_space(c: char) -> bool {
+    matches!(
+        c,
+        '\t' | ' ' | '\u{00a0}' | '\u{1680}' | '\u{2000}'
+            ..='\u{200A}' | '\u{202F}' | '\u{205F}' | '\u{3000}'
+    )
 }
 
 // single-line-comment := '//' ^newline* (newline | eof)
@@ -842,7 +866,7 @@ fn single_line_comment<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Cl
     begin_comment('/')
         .ignore_then(
             any::<_, Error>()
-                .filter(|c: &char| !is_newline_char(c))
+                .filter(|c| !is_newline_char(*c))
                 .repeated(),
         )
         .then(newline().or(end()))
@@ -919,12 +943,12 @@ fn newline<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
         .then_ignore(just('\n').or_not()) // CR, or CRLF
         .ignored()
         .or(any::<_, Error>()
-            .filter(|c: &char| is_newline_char(c) && *c != '\r')
+            .filter(|c| is_newline_char(*c) && *c != '\r')
             .ignored())
         .map_err(|e: ParseError| e.with_expected_kind("newline"))
 }
 
-fn is_newline_char(c: &char) -> bool {
+fn is_newline_char(c: char) -> bool {
     matches!(
         c,
         '\r' |          // Carriage return
@@ -939,7 +963,7 @@ fn is_newline_char(c: &char) -> bool {
 
 // line-space := node-space | newline | single-line-comment
 fn line_space<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
-    newline().or(ws()).or(single_line_comment())
+    node_space().or(newline()).or(single_line_comment())
 }
 
 // node-space := ws* escline ws* | ws+
@@ -990,40 +1014,129 @@ fn make_spanned<'src, T>(
     }
 }
 
-// --- Helper functions for multi-line strings ---
+// --- Decoding strings ---
 
-/// Normalize newlines: convert all newline variants to LF
-fn normalize_newlines(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
+/// The character an escape `\c` stands for, for the single-character escapes.
+fn escape_char(c: char) -> Option<char> {
+    Some(match c {
+        '"' | '\\' => c,
+        'b' => '\u{0008}',
+        'f' => '\u{000C}',
+        'n' => '\n',
+        'r' => '\r',
+        't' => '\t',
+        's' => ' ',
+        _ => return None,
+    })
+}
+
+/// Decode the escapes in a string's text. The text has already been checked
+/// against `string-character`, so every `\` begins a valid escape.
+fn unescape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
-        match c {
-            '\r' => {
-                // CRLF or CR -> LF
-                if chars.peek() == Some(&'\n') {
-                    chars.next();
-                }
-                result.push('\n');
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('u') => {
+                // 'u{' hex-unicode '}'
+                let hex: String = chars.by_ref().skip(1).take_while(|&c| c != '}').collect();
+                let code = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32);
+                out.push(code.unwrap_or(char::REPLACEMENT_CHARACTER));
             }
-            '\x0C' | '\x0B' | '\u{0085}' | '\u{2028}' | '\u{2029}' => {
-                result.push('\n');
+            // ws-escape: the `\` and all the whitespace after it are dropped
+            Some(c) if is_unicode_space(c) || is_newline_char(c) => {
+                while chars
+                    .next_if(|&c| is_unicode_space(c) || is_newline_char(c))
+                    .is_some()
+                {}
             }
-            _ => result.push(c),
+            Some(c) => out.push(escape_char(c).unwrap_or(c)),
+            None => {}
         }
     }
-    result
+    out
 }
 
-/// Check if a character is a KDL whitespace character
-fn is_kdl_ws(c: char) -> bool {
-    matches!(
-        c,
-        '\t' | ' ' | '\u{00a0}' | '\u{1680}' | '\u{2000}'
-            ..='\u{200A}' | '\u{202F}' | '\u{205F}' | '\u{3000}'
-    )
+/// The body of a multi-line string with the two transformations the spec
+/// applies before dedenting: literal newlines normalized to LF and, unless
+/// the string is raw, whitespace escapes resolved (that is, dropped). The
+/// other escapes are handled only after the dedent. [`unescape`] does that.
+///
+/// Both transformations only ever drop bytes, so a position in the result
+/// can be traced back to the source for error reporting.
+struct MultilineBody {
+    text: String,
+    /// Runs of bytes dropped from the source, as `(position in text, count)`.
+    dropped: Vec<(usize, usize)>,
 }
 
-/// Error type for multi-line string dedentation with location information
+impl MultilineBody {
+    fn of_quoted(source: &str) -> MultilineBody {
+        MultilineBody::new(source, true)
+    }
+
+    fn of_raw(source: &str) -> MultilineBody {
+        MultilineBody::new(source, false)
+    }
+
+    fn new(source: &str, escapes: bool) -> MultilineBody {
+        let mut text = String::with_capacity(source.len());
+        let mut dropped = Vec::new();
+        let mut chars = source.char_indices().peekable();
+        let is_ws = |&(_, c): &(usize, char)| is_unicode_space(c) || is_newline_char(c);
+        while let Some((i, c)) = chars.next() {
+            match c {
+                // ws-escape := '\\' (unicode-space | newline)+
+                '\\' if escapes && chars.peek().is_some_and(is_ws) => {
+                    while chars.next_if(is_ws).is_some() {}
+                    let end = chars.peek().map_or(source.len(), |&(j, _)| j);
+                    dropped.push((text.len(), end - i));
+                }
+                // Any other escape is left for `unescape`. Its second
+                // character is copied as well, so that the `\` of `\\` cannot
+                // pass for the start of a whitespace escape.
+                '\\' if escapes => {
+                    text.push(c);
+                    if let Some((_, next)) = chars.next() {
+                        text.push(next);
+                    }
+                }
+                '\r' => {
+                    text.push('\n');
+                    if chars.next_if(|&(_, next)| next == '\n').is_some() {
+                        dropped.push((text.len(), 1));
+                    }
+                }
+                _ if is_newline_char(c) => {
+                    text.push('\n');
+                    if c.len_utf8() > 1 {
+                        dropped.push((text.len(), c.len_utf8() - 1));
+                    }
+                }
+                _ => text.push(c),
+            }
+        }
+        MultilineBody { text, dropped }
+    }
+
+    /// The position in the source of a position in `text`.
+    fn source_offset(&self, offset: usize) -> usize {
+        let dropped_before: usize = self
+            .dropped
+            .iter()
+            .take_while(|&&(at, _)| at <= offset)
+            .map(|&(_, count)| count)
+            .sum();
+        offset + dropped_before
+    }
+}
+
+/// Why a multi-line string could not be dedented, with byte offsets into the
+/// string's body.
 enum MultilineStringError {
     NoOpeningNewline,
     ClosingNotOnOwnLine,
@@ -1031,7 +1144,8 @@ enum MultilineStringError {
 }
 
 /// Emit a parse error for a multiline string dedent failure.
-/// `opening_delimiter_len` is the length of the opening delimiter (e.g. 3 for `"""`, 3+hashes for raw).
+/// `opening_delimiter_len` is the length of the opening delimiter
+/// (e.g. 3 for `"""`, 3+hashes for raw).
 /// `closing_delimiter_len` is the length of the closing delimiter.
 fn emit_multiline_dedent_error(
     e: MultilineStringError,
@@ -1064,162 +1178,55 @@ fn emit_multiline_dedent_error(
     });
 }
 
-/// Dedent a multi-line string based on the closing line's whitespace prefix.
-fn dedent_multiline_string(s: &str) -> Result<(String, usize), MultilineStringError> {
-    let normalized = normalize_newlines(s);
+/// Dedent a multi-line string by the whitespace prefix of its closing line, as
+/// described under "Multi-line String" in the spec. The body is everything
+/// between the opening and closing `"""`, which the grammar wants to be
+/// `newline (multi-line-string-body newline)? unicode-space*`.
+///
+/// The result still contains its non-whitespace escapes, if it has any.
+fn dedent_multiline_string(body: &MultilineBody) -> Result<String, MultilineStringError> {
+    let text = &body.text;
 
-    let last_newline_pos = match normalized.rfind('\n') {
-        Some(pos) => pos,
-        None => {
-            return Err(MultilineStringError::NoOpeningNewline);
-        }
+    let Some(last_newline_pos) = text.rfind('\n') else {
+        return Err(MultilineStringError::NoOpeningNewline);
     };
 
-    let indent = &normalized[last_newline_pos + 1..];
-    let indent_len = indent.len();
-
-    if !indent.chars().all(is_kdl_ws) {
+    let indent = &text[last_newline_pos + 1..];
+    if !indent.chars().all(is_unicode_space) {
         return Err(MultilineStringError::ClosingNotOnOwnLine);
     }
 
-    let before_last_newline = &normalized[..last_newline_pos];
-
-    if before_last_newline.is_empty() {
-        return Ok((String::new(), indent_len));
+    // The first and last newline may be one and the same: an empty string.
+    let lines = &text[..last_newline_pos];
+    if lines.is_empty() {
+        return Ok(String::new());
     }
-
-    if !before_last_newline.starts_with('\n') {
+    let Some(lines) = lines.strip_prefix('\n') else {
         return Err(MultilineStringError::NoOpeningNewline);
-    }
+    };
 
-    let content = &before_last_newline[1..];
-
-    let mut result = String::with_capacity(content.len());
-    let mut offset_in_content = 0usize;
+    let mut result = String::with_capacity(lines.len());
+    let mut line_start = 1; // offset of the current line in `text`
     let mut first = true;
-    for line in content.split('\n') {
+    for line in lines.split('\n') {
         if !first {
             result.push('\n');
+        } else {
+            first = false;
         }
-        first = false;
-
-        if line.chars().all(is_kdl_ws) {
-            offset_in_content += line.len() + 1;
-            continue;
-        }
-
-        if !line.starts_with(indent) {
-            let ws_prefix_byte_len: usize = line
-                .chars()
-                .take_while(|c| is_kdl_ws(*c))
-                .map(|c| c.len_utf8())
-                .sum();
+        if line.chars().all(is_unicode_space) {
+            // Whitespace-only lines are empty in the value, however indented
+        } else if let Some(rest) = line.strip_prefix(indent) {
+            result.push_str(rest);
+        } else {
+            let prefix_len = line.len() - line.trim_start_matches(is_unicode_space).len();
+            let offset = body.source_offset(line_start);
             return Err(MultilineStringError::InsufficientIndent {
-                offset: 1 + offset_in_content,
-                length: ws_prefix_byte_len,
+                offset,
+                length: body.source_offset(line_start + prefix_len) - offset,
             });
         }
-        result.push_str(&line[indent.len()..]);
-        offset_in_content += line.len() + 1;
-    }
-
-    Ok((result, indent_len))
-}
-
-/// Process escape sequences in a string
-fn process_escapes(s: &str) -> Result<String, (usize, usize, String)> {
-    let mut result = String::with_capacity(s.len());
-    let mut chars = s.char_indices().peekable();
-
-    while let Some((i, c)) = chars.next() {
-        if c == '\\' {
-            match chars.next() {
-                Some((_, '"')) => result.push('"'),
-                Some((_, '\\')) => result.push('\\'),
-                Some((_, 'b')) => result.push('\u{0008}'),
-                Some((_, 'f')) => result.push('\u{000C}'),
-                Some((_, 'n')) => result.push('\n'),
-                Some((_, 'r')) => result.push('\r'),
-                Some((_, 't')) => result.push('\t'),
-                Some((_, 's')) => result.push(' '),
-                Some((_, 'u')) => {
-                    'check_brace: {
-                        let char_len = match chars.next() {
-                            Some((_, '{')) => {
-                                break 'check_brace;
-                            }
-                            Some((_, c)) => c.len_utf8(),
-                            None => 0,
-                        };
-                        return Err((i, i + 2 + char_len, "expected '{' after \\u".to_string()));
-                    }
-                    let mut hex = String::new();
-                    let close_pos = loop {
-                        match chars.next() {
-                            Some((j, '}')) => {
-                                break j + 1;
-                            }
-                            Some((j, c)) if c.is_ascii_hexdigit() => {
-                                if hex.len() >= 6 {
-                                    return Err((
-                                        i,
-                                        j + c.len_utf8(),
-                                        "unicode escape too long".to_string(),
-                                    ));
-                                }
-                                hex.push(c);
-                            }
-                            Some((j, c)) => {
-                                return Err((
-                                    i,
-                                    j + c.len_utf8(),
-                                    format!("invalid character '{}' in unicode escape", c),
-                                ));
-                            }
-                            None => {
-                                return Err((i, s.len(), "unclosed unicode escape".to_string()));
-                            }
-                        }
-                    };
-                    if hex.is_empty() {
-                        return Err((i, close_pos, "empty unicode escape".to_string()));
-                    }
-                    let code = u32::from_str_radix(&hex, 16).unwrap();
-                    match char::try_from(code) {
-                        Ok(c) => result.push(c),
-                        Err(_) => {
-                            return Err((
-                                i,
-                                close_pos,
-                                format!("invalid unicode code point: {}", code),
-                            ));
-                        }
-                    }
-                }
-                Some((_, c)) if c == ' ' || c == '\t' || c == '\n' || is_kdl_ws(c) => {
-                    while let Some(&(_, next)) = chars.peek() {
-                        if next == ' ' || next == '\t' || next == '\n' || is_kdl_ws(next) {
-                            chars.next();
-                        } else {
-                            break;
-                        }
-                    }
-                    result.push(' ');
-                }
-                Some((j, c)) => {
-                    return Err((
-                        i,
-                        j + c.len_utf8(),
-                        format!("invalid escape character: '{}'", c),
-                    ));
-                }
-                None => {
-                    return Err((i, i + 1, "trailing backslash".to_string()));
-                }
-            }
-        } else {
-            result.push(c);
-        }
+        line_start += line.len() + 1;
     }
 
     Ok(result)
@@ -1921,7 +1928,7 @@ mod test {
 
     #[test]
     fn parse_multiline_str_err_expected_brace_after_u() {
-        // \u without { in multi-line string - points to \uA (the wrong char after \u)
+        // \u without { in a multi-line string - points at the character after \u
         err_eq!(
             parse(string(), "\"\"\"\n\\uABCD\n\"\"\""),
             r#"{
@@ -1929,12 +1936,12 @@ mod test {
             "severity": "error",
             "labels": [],
             "related": [{
-                "message": "expected '{' after \\u",
+                "message": "found `A`, expected `{`",
                 "severity": "error",
                 "filename": "<test>",
                 "labels": [
-                    {"label": "invalid escape sequence",
-                    "span": {"offset": 4, "length": 3}}
+                    {"label": "unexpected token",
+                    "span": {"offset": 6, "length": 1}}
                 ],
                 "related": []
             }]
@@ -1944,7 +1951,7 @@ mod test {
 
     #[test]
     fn parse_multiline_str_err_expected_brace_after_u_eoi() {
-        // \u without { in multi-line string - points to \uA (the wrong char after \u)
+        // \u at the end of a line - points at the newline
         err_eq!(
             parse(string(), "\"\"\"\n\\u\n\"\"\""),
             r#"{
@@ -1952,12 +1959,12 @@ mod test {
             "severity": "error",
             "labels": [],
             "related": [{
-                "message": "expected '{' after \\u",
+                "message": "found `\\n`, expected `{`",
                 "severity": "error",
                 "filename": "<test>",
                 "labels": [
-                    {"label": "invalid escape sequence",
-                    "span": {"offset": 4, "length": 2}}
+                    {"label": "unexpected token",
+                    "span": {"offset": 6, "length": 1}}
                 ],
                 "related": []
             }]
@@ -1967,7 +1974,7 @@ mod test {
 
     #[test]
     fn parse_multiline_str_err_unicode_escape_too_long() {
-        // More than 6 hex digits in unicode escape - spans the whole escape including excess digit
+        // More than 6 hex digits in a unicode escape - points at the excess digit
         err_eq!(
             parse(string(), "\"\"\"\n\\u{1234567}\n\"\"\""),
             r#"{
@@ -1975,12 +1982,12 @@ mod test {
             "severity": "error",
             "labels": [],
             "related": [{
-                "message": "unicode escape too long",
+                "message": "found `7`, expected `}`",
                 "severity": "error",
                 "filename": "<test>",
                 "labels": [
-                    {"label": "invalid escape sequence",
-                    "span": {"offset": 4, "length": 10}}
+                    {"label": "unexpected token",
+                    "span": {"offset": 13, "length": 1}}
                 ],
                 "related": []
             }]
@@ -1990,7 +1997,7 @@ mod test {
 
     #[test]
     fn parse_multiline_str_err_invalid_char_in_unicode_escape() {
-        // Invalid character 'g' in unicode escape - spans up to and including the invalid char
+        // Invalid character 'g' in a unicode escape - points at that character
         err_eq!(
             parse(string(), "\"\"\"\n\\u{12gh}\n\"\"\""),
             r#"{
@@ -1998,126 +2005,11 @@ mod test {
             "severity": "error",
             "labels": [],
             "related": [{
-                "message": "invalid character 'g' in unicode escape",
+                "message": "found `g`, expected `}` or hexadecimal digit",
                 "severity": "error",
                 "filename": "<test>",
                 "labels": [
-                    {"label": "invalid escape sequence",
-                    "span": {"offset": 4, "length": 6}}
-                ],
-                "related": []
-            }]
-        }"#
-        );
-    }
-
-    #[test]
-    fn parse_multiline_str_err_unclosed_unicode_escape() {
-        // Unclosed unicode escape - \u{1234 without closing }
-        err_eq!(
-            parse(string(), "\"\"\"\n\\u{1234\n\"\"\""),
-            r#"{
-            "message": "error parsing KDL",
-            "severity": "error",
-            "labels": [],
-            "related": [{
-                "message": "unclosed unicode escape",
-                "severity": "error",
-                "filename": "<test>",
-                "labels": [
-                    {"label": "invalid escape sequence",
-                    "span": {"offset": 4, "length": 7}}
-                ],
-                "related": []
-            }]
-        }"#
-        );
-    }
-
-    #[test]
-    fn parse_multiline_str_err_empty_unicode_escape() {
-        // Empty unicode escape \u{} - spans the whole escape
-        err_eq!(
-            parse(string(), "\"\"\"\n\\u{}\n\"\"\""),
-            r#"{
-            "message": "error parsing KDL",
-            "severity": "error",
-            "labels": [],
-            "related": [{
-                "message": "empty unicode escape",
-                "severity": "error",
-                "filename": "<test>",
-                "labels": [
-                    {"label": "invalid escape sequence",
-                    "span": {"offset": 4, "length": 4}}
-                ],
-                "related": []
-            }]
-        }"#
-        );
-    }
-
-    #[test]
-    fn parse_multiline_str_err_invalid_unicode_code_point() {
-        // Invalid unicode code point (surrogate) - spans the whole escape
-        err_eq!(
-            parse(string(), "\"\"\"\n\\u{D800}\n\"\"\""),
-            r#"{
-            "message": "error parsing KDL",
-            "severity": "error",
-            "labels": [],
-            "related": [{
-                "message": "invalid unicode code point: 55296",
-                "severity": "error",
-                "filename": "<test>",
-                "labels": [
-                    {"label": "invalid escape sequence",
-                    "span": {"offset": 4, "length": 8}}
-                ],
-                "related": []
-            }]
-        }"#
-        );
-    }
-
-    #[test]
-    fn parse_multiline_str_err_invalid_escape_char() {
-        // Invalid escape character \x - spans the backslash and invalid char
-        err_eq!(
-            parse(string(), "\"\"\"\n\\x01\n\"\"\""),
-            r#"{
-            "message": "error parsing KDL",
-            "severity": "error",
-            "labels": [],
-            "related": [{
-                "message": "invalid escape character: 'x'",
-                "severity": "error",
-                "filename": "<test>",
-                "labels": [
-                    {"label": "invalid escape sequence",
-                    "span": {"offset": 4, "length": 2}}
-                ],
-                "related": []
-            }]
-        }"#
-        );
-    }
-
-    #[test]
-    fn parse_multiline_str_err_trailing_backslash() {
-        // Trailing backslash at end of content - spans just the backslash
-        err_eq!(
-            parse(string(), "\"\"\"\nhello\\\n\"\"\""),
-            r#"{
-            "message": "error parsing KDL",
-            "severity": "error",
-            "labels": [],
-            "related": [{
-                "message": "trailing backslash",
-                "severity": "error",
-                "filename": "<test>",
-                "labels": [
-                    {"label": "invalid escape sequence",
+                    {"label": "unexpected character",
                     "span": {"offset": 9, "length": 1}}
                 ],
                 "related": []
@@ -2127,11 +2019,126 @@ mod test {
     }
 
     #[test]
+    fn parse_multiline_str_err_unclosed_unicode_escape() {
+        // Unclosed unicode escape - \u{1234 without closing } - points at the newline
+        err_eq!(
+            parse(string(), "\"\"\"\n\\u{1234\n\"\"\""),
+            r#"{
+            "message": "error parsing KDL",
+            "severity": "error",
+            "labels": [],
+            "related": [{
+                "message": "found `\\n`, expected `}` or hexadecimal digit",
+                "severity": "error",
+                "filename": "<test>",
+                "labels": [
+                    {"label": "unexpected character",
+                    "span": {"offset": 11, "length": 1}}
+                ],
+                "related": []
+            }]
+        }"#
+        );
+    }
+
+    #[test]
+    fn parse_multiline_str_err_empty_unicode_escape() {
+        // Empty unicode escape \u{} - points at the closing brace
+        err_eq!(
+            parse(string(), "\"\"\"\n\\u{}\n\"\"\""),
+            r#"{
+            "message": "error parsing KDL",
+            "severity": "error",
+            "labels": [],
+            "related": [{
+                "message": "found `}`, expected hexadecimal digit",
+                "severity": "error",
+                "filename": "<test>",
+                "labels": [
+                    {"label": "unexpected character",
+                    "span": {"offset": 7, "length": 1}}
+                ],
+                "related": []
+            }]
+        }"#
+        );
+    }
+
+    #[test]
+    fn parse_multiline_str_err_invalid_unicode_code_point() {
+        // Invalid unicode code point (surrogate) - spans the braces and the digits
+        err_eq!(
+            parse(string(), "\"\"\"\n\\u{D800}\n\"\"\""),
+            r#"{
+            "message": "error parsing KDL",
+            "severity": "error",
+            "labels": [],
+            "related": [{
+                "message": "converted integer out of range for `char`",
+                "severity": "error",
+                "filename": "<test>",
+                "labels": [
+                    {"label": "invalid character code",
+                    "span": {"offset": 6, "length": 6}}
+                ],
+                "related": []
+            }]
+        }"#
+        );
+    }
+
+    #[test]
+    fn parse_multiline_str_err_invalid_escape_char() {
+        // Invalid escape character \x - points at the character after the backslash
+        err_eq!(
+            parse(string(), "\"\"\"\n\\x01\n\"\"\""),
+            r#"{
+            "message": "error parsing KDL",
+            "severity": "error",
+            "labels": [],
+            "related": [{
+                "message": "found `x`, expected `\"`, `\\`, `b`, `f`, `n`, `r`, `s`, `t`, `u` or newline",
+                "severity": "error",
+                "filename": "<test>",
+                "labels": [
+                    {"label": "invalid escape char",
+                    "span": {"offset": 5, "length": 1}}
+                ],
+                "related": []
+            }]
+        }"#
+        );
+    }
+
+    #[test]
+    fn parse_multiline_str_err_trailing_backslash() {
+        // A backslash before the final newline escapes it, which puts the closing
+        // delimiter on the same line as `hello`; the spec calls this out as illegal
+        err_eq!(
+            parse(string(), "\"\"\"\nhello\\\n\"\"\""),
+            r#"{
+            "message": "error parsing KDL",
+            "severity": "error",
+            "labels": [],
+            "related": [{
+                "message": "closing delimiter must be on its own line with only whitespace prefix",
+                "severity": "error",
+                "filename": "<test>",
+                "labels": [
+                    {"label": "must be on its own line",
+                    "span": {"offset": 11, "length": 3}}
+                ],
+                "related": []
+            }]
+        }"#
+        );
+    }
+
+    #[test]
     fn parse_multiline_str_err_second_line() {
-        // Error on second line of multi-line string
-        // Input: """\n    line1\n    \x01\n    """
-        // The \x is at source offset 18-19 (after """, newline, indent, line1, newline, indent)
-        // With correct span calculation, offset should be 18, length 2
+        // Error on the second line of a multi-line string
+        // Input: \"\"\"\n    line1\n    \x01\n    \"\"\"
+        // The \x is at source offset 18-19 (after \"\"\", newline, indent, line1, newline, indent)
         err_eq!(
             parse(string(), "\"\"\"\n    line1\n    \\x01\n    \"\"\""),
             r#"{
@@ -2139,12 +2146,12 @@ mod test {
             "severity": "error",
             "labels": [],
             "related": [{
-                "message": "invalid escape character: 'x'",
+                "message": "found `x`, expected `\"`, `\\`, `b`, `f`, `n`, `r`, `s`, `t`, `u` or newline",
                 "severity": "error",
                 "filename": "<test>",
                 "labels": [
-                    {"label": "invalid escape sequence",
-                    "span": {"offset": 18, "length": 2}}
+                    {"label": "invalid escape char",
+                    "span": {"offset": 19, "length": 1}}
                 ],
                 "related": []
             }]
@@ -2154,26 +2161,9 @@ mod test {
 
     #[test]
     fn parse_multiline_str_err_non_ascii_indent() {
-        // Test with non-ASCII whitespace in indentation
-        // Both content line and closing line use: ASCII space + non-breaking space (U+00A0)
-        // This verifies byte-based indent_len works correctly with multi-byte whitespace
-        //
-        // Byte layout:
-        // - bytes 0-2: """
-        // - byte 3: \n
-        // - byte 4: ASCII space
-        // - bytes 5-6: U+00A0 (NBSP, 2 bytes in UTF-8)
-        // - bytes 7-11: hello
-        // - byte 12: \
-        // - byte 13: x
-        // - bytes 14-15: 01
-        // - byte 16: \n
-        // - byte 17: ASCII space
-        // - bytes 18-19: U+00A0
-        // - bytes 20-22: """
-        //
-        // indent_len = 3 bytes (1 space + 2 for NBSP)
-        // The \x escape error should be at source offset 12, length 2
+        // Non-ASCII whitespace in the indentation: the content line and the closing
+        // line both start with an ASCII space and a no-break space (U+00A0, 2 bytes),
+        // so `hello` spans bytes 7-11 and the `\x` escape is at bytes 12-13
         err_eq!(
             parse(string(), "\"\"\"\n \u{00A0}hello\\x01\n \u{00A0}\"\"\""),
             r#"{
@@ -2181,12 +2171,12 @@ mod test {
             "severity": "error",
             "labels": [],
             "related": [{
-                "message": "invalid escape character: 'x'",
+                "message": "found `x`, expected `\"`, `\\`, `b`, `f`, `n`, `r`, `s`, `t`, `u` or newline",
                 "severity": "error",
                 "filename": "<test>",
                 "labels": [
-                    {"label": "invalid escape sequence",
-                    "span": {"offset": 12, "length": 2}}
+                    {"label": "invalid escape char",
+                    "span": {"offset": 13, "length": 1}}
                 ],
                 "related": []
             }]
