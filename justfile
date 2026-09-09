@@ -10,6 +10,14 @@ test:
 conformance *filter:
   cargo run --example conformance -- {{filter}}
 
+# Run the implementation-agnostic KDL test suite
+# (https://github.com/kdl-org/kdl-test). Requires the `kdl-test` binary on $PATH.
+# An optional argument selects individual cases, e.g.
+# `just kdl-test valid/arg_bare.kdl`.
+kdl-test *tests:
+  cargo build --release --example kdl_test_decoder
+  kdl-test run --decoder examples/kdl_test_decoder.sh {{tests}}
+
 lint:
   cargo fmt --check
   cargo clippy --workspace --all-targets
