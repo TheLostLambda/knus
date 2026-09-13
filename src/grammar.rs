@@ -948,7 +948,7 @@ fn newline<'src>() -> impl Parser<'src, Input<'src>, (), Error> + Clone {
         .map_err(|e: ParseError| e.with_expected_kind("newline"))
 }
 
-fn is_newline_char(c: char) -> bool {
+pub(crate) fn is_newline_char(c: char) -> bool {
     matches!(
         c,
         '\r' |          // Carriage return

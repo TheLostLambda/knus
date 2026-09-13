@@ -5,6 +5,8 @@
 //! more elaborate thing that includes file name or can refer to the defaults
 //! as a separate kind of span. See [`traits::DecodeSpan`].
 use crate::decode::Context;
+#[cfg(feature = "line-numbers")]
+use crate::grammar::is_newline_char;
 use crate::traits::DecodeSpan;
 
 use chumsky::span::SimpleSpan;
@@ -98,6 +100,7 @@ impl Span {
     }
 }
 
+#[cfg(feature = "line-numbers")]
 fn line_column_of_end(text: &str) -> (usize, usize) {
     let mut caret_return = false;
     let mut line = 0;
@@ -105,8 +108,11 @@ fn line_column_of_end(text: &str) -> (usize, usize) {
     let mut iter = text.chars();
     while let Some(c) = iter.next() {
         match c {
+            // `CRLF` counts as a single newline.
             '\n' if caret_return => {}
-            '\r' | '\n' | '\x0C' | '\u{0085}' | '\u{2028}' | '\u{2029}' => {
+            // Shared with the parser so that the two cannot disagree about
+            // what a line break is.
+            c if is_newline_char(c) => {
                 line += 1;
                 last_line = iter.as_str();
             }
@@ -216,7 +222,7 @@ impl<T: std::hash::Hash> std::hash::Hash for Spanned<T> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "line-numbers"))]
 mod tests {
     use super::*;
     #[test]
@@ -243,6 +249,22 @@ mod tests {
         let ((start_line, start_col), (end_line, end_col)) = span.to_line_column(text);
         assert_eq!((start_line, start_col), (1, 0));
         assert_eq!((end_line, end_col), (1, 5));
+    }
+
+    #[test]
+    fn test_line_column_unicode_newlines() {
+        // The KDL spec's Newline table is wider than `\r` and `\n`: all of
+        // these terminate a node, so they have to advance the line here too.
+        for sep in ['\x0B', '\x0C', '\u{0085}', '\u{2028}', '\u{2029}'] {
+            let text = format!("a{sep}b");
+            let start = 1 + sep.len_utf8();
+            let span = Span(start, start + 1); // "b"
+            assert_eq!(
+                span.to_line_column(&text),
+                ((1, 0), (1, 1)),
+                "wrong position after {sep:?}"
+            );
+        }
     }
 
     #[test]
