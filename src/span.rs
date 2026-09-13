@@ -1,9 +1,13 @@
 //! Knus produces only a very simple span during parsing:
 //! [`Span`] which only tracks byte offset from the start of the source code
 //!
+//! Line and column numbers are computed afterwards, from the source text, by
+//! building a [`LineIndex`] once and then converting spans into [`LineSpan`]s
+//! as needed.
+//!
 //! On the other hand, on the decode stage you can convert your span types into
 //! more elaborate thing that includes file name or can refer to the defaults
-//! as a separate kind of span. See [`traits::DecodeSpan`].
+//! as a separate kind of span. See [`DecodeSpan`].
 use crate::decode::Context;
 #[cfg(feature = "line-numbers")]
 use crate::grammar::is_newline_char;
@@ -34,6 +38,35 @@ pub struct Span(
 impl From<Span> for ErrorSpan {
     fn from(val: Span) -> Self {
         (val.0, val.1.saturating_sub(val.0)).into()
+    }
+}
+
+/// Line and column position of the datum in the source code
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
+#[cfg_attr(feature = "minicbor", derive(minicbor::Encode, minicbor::Decode))]
+pub struct LinePos {
+    /// Zero-based byte offset
+    #[cfg_attr(feature = "minicbor", n(0))]
+    pub offset: usize,
+    /// Zero-based line number
+    #[cfg_attr(feature = "minicbor", n(1))]
+    pub line: usize,
+    /// Zero-based column number
+    #[cfg_attr(feature = "minicbor", n(2))]
+    pub column: usize,
+}
+
+/// A span with line and column numbers, as produced by [`LineIndex`]
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
+#[cfg_attr(feature = "minicbor", derive(minicbor::Encode, minicbor::Decode))]
+pub struct LineSpan(
+    #[cfg_attr(feature = "minicbor", n(0))] pub LinePos,
+    #[cfg_attr(feature = "minicbor", n(1))] pub LinePos,
+);
+
+impl From<LineSpan> for ErrorSpan {
+    fn from(val: LineSpan) -> Self {
+        (val.0.offset, val.1.offset.saturating_sub(val.0.offset)).into()
     }
 }
 
@@ -78,50 +111,91 @@ impl Span {
     pub fn length(&self) -> usize {
         self.1.saturating_sub(self.0)
     }
+}
 
-    #[cfg(feature = "line-numbers")]
-    /// Converts the span's byte offsets to zero-based line/column pairs
-    pub fn to_line_column(&self, text: &str) -> ((usize, usize), (usize, usize)) {
-        let prefix = &text[..self.0];
-        let (start_line, start_column) = line_column_of_end(prefix);
-        let span_text = &text[self.0..self.1];
-        let (end_line, end_column) = line_column_of_end(span_text);
-        (
-            (start_line, start_column),
-            (
-                start_line + end_line,
-                if end_line == 0 {
-                    start_column + end_column
-                } else {
-                    end_column
-                },
-            ),
-        )
-    }
+/// An index of the line starts of a source text
+///
+/// Building the index takes a single pass over the text, after which any
+/// number of [`Span`]s can be converted into line and column numbers in
+/// logarithmic time (plus the length of the line the position is on).
+///
+/// ```
+/// use knus::span::{LineIndex, Span};
+///
+/// let index = LineIndex::new("node1\nnode2\n");
+/// let line_span = index.line_span(Span(6, 11));
+/// assert_eq!((line_span.0.line, line_span.0.column), (1, 0));
+/// assert_eq!((line_span.1.line, line_span.1.column), (1, 5));
+/// ```
+#[cfg(feature = "line-numbers")]
+#[derive(Clone, Debug)]
+pub struct LineIndex<'a> {
+    text: &'a str,
+    /// Byte offset of the start of each line; the first entry is always zero.
+    line_starts: Vec<usize>,
 }
 
 #[cfg(feature = "line-numbers")]
-fn line_column_of_end(text: &str) -> (usize, usize) {
-    let mut caret_return = false;
-    let mut line = 0;
-    let mut last_line = text;
-    let mut iter = text.chars();
-    while let Some(c) = iter.next() {
-        match c {
-            // `CRLF` counts as a single newline.
-            '\n' if caret_return => {}
-            // Shared with the parser so that the two cannot disagree about
-            // what a line break is.
-            c if is_newline_char(c) => {
-                line += 1;
-                last_line = iter.as_str();
+impl<'a> LineIndex<'a> {
+    /// Indexes the line starts of the given source text
+    pub fn new(text: &'a str) -> Self {
+        let mut line_starts = vec![0];
+        let mut caret_return = false;
+        for (offset, c) in text.char_indices() {
+            match c {
+                // `CRLF` counts as a single newline. The line then starts at
+                // the `\n` itself, which is zero-width, so columns still come
+                // out right.
+                '\n' if caret_return => {}
+                // Shared with the parser so that the two cannot disagree about
+                // what a line break is.
+                c if is_newline_char(c) => line_starts.push(offset + c.len_utf8()),
+                _ => {}
             }
-            _ => {}
+            caret_return = c == '\r';
         }
-        caret_return = c == '\r';
+        LineIndex { text, line_starts }
     }
-    let column = unicode_width::UnicodeWidthStr::width(last_line);
-    (line, column)
+
+    /// Converts a byte offset into a zero-based line and column number
+    ///
+    /// Columns are counted in display width: a tab is eight columns wide and
+    /// control characters are zero columns wide.
+    ///
+    /// An offset past the end of the text is clamped to the end.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the offset is not on a `char` boundary of the indexed text.
+    pub fn line_pos(&self, offset: usize) -> LinePos {
+        let offset = offset.min(self.text.len());
+        // `line_starts` always starts with a zero, so there is at least one
+        // entry that is not greater than the offset.
+        let line = self.line_starts.partition_point(|&start| start <= offset) - 1;
+        let column = self.text[self.line_starts[line]..offset]
+            .chars()
+            .map(|c| match c {
+                '\t' => 8,
+                // Control characters are treated as zero-width.
+                c => unicode_width::UnicodeWidthChar::width(c).unwrap_or(0),
+            })
+            .sum();
+        LinePos {
+            offset,
+            line,
+            column,
+        }
+    }
+
+    /// Converts the byte offsets of a span into line and column numbers
+    pub fn line_span(&self, span: Span) -> LineSpan {
+        LineSpan(self.line_pos(span.0), self.line_pos(span.1))
+    }
+
+    /// The number of lines in the indexed text
+    pub fn line_count(&self) -> usize {
+        self.line_starts.len()
+    }
 }
 
 impl DecodeSpan for Span {
@@ -225,30 +299,35 @@ impl<T: std::hash::Hash> std::hash::Hash for Spanned<T> {
 #[cfg(all(test, feature = "line-numbers"))]
 mod tests {
     use super::*;
+
+    fn line_column(index: &LineIndex, span: Span) -> ((usize, usize), (usize, usize)) {
+        let LineSpan(start, end) = index.line_span(span);
+        ((start.line, start.column), (end.line, end.column))
+    }
+
     #[test]
     fn test_line_column() {
         let text = "Hello\nWorld!\nThis is a test.\n";
-        let span = Span(6, 12); // "World!"
-        let ((start_line, start_col), (end_line, end_col)) = span.to_line_column(text);
-        assert_eq!((start_line, start_col), (1, 0));
-        assert_eq!((end_line, end_col), (1, 6));
-        let span2 = Span(0, 5); // "Hello"
-        let ((s_line, s_col), (e_line, e_col)) = span2.to_line_column(text);
-        assert_eq!((s_line, s_col), (0, 0));
-        assert_eq!((e_line, e_col), (0, 5));
-        let span3 = Span(17, 25); // " is a te"
-        let ((s_line3, s_col3), (e_line3, e_col3)) = span3.to_line_column(text);
-        assert_eq!((s_line3, s_col3), (2, 4));
-        assert_eq!((e_line3, e_col3), (2, 12));
+        let index = LineIndex::new(text);
+        assert_eq!(index.line_count(), 4);
+        // The same index answers every span; "World!", "Hello" and " is a te".
+        assert_eq!(line_column(&index, Span(6, 12)), ((1, 0), (1, 6)));
+        assert_eq!(line_column(&index, Span(0, 5)), ((0, 0), (0, 5)));
+        assert_eq!(line_column(&index, Span(17, 25)), ((2, 4), (2, 12)));
+        // A span across lines gets each end measured from its own line start.
+        assert_eq!(line_column(&index, Span(3, 8)), ((0, 3), (1, 2)));
     }
 
     #[test]
     fn test_line_column_carriage_return() {
         let text = "Line1\rLine2\r\nLine3\nLine4";
+        let index = LineIndex::new(text);
+        // `CRLF` is a single line break, so there are four lines, not five.
+        assert_eq!(index.line_count(), 4);
         let span = Span(6, 11); // "Line2"
-        let ((start_line, start_col), (end_line, end_col)) = span.to_line_column(text);
-        assert_eq!((start_line, start_col), (1, 0));
-        assert_eq!((end_line, end_col), (1, 5));
+        assert_eq!(line_column(&index, span), ((1, 0), (1, 5)));
+        let span = Span(13, 18); // "Line3"
+        assert_eq!(line_column(&index, span), ((2, 0), (2, 5)));
     }
 
     #[test]
@@ -257,10 +336,11 @@ mod tests {
         // these terminate a node, so they have to advance the line here too.
         for sep in ['\x0B', '\x0C', '\u{0085}', '\u{2028}', '\u{2029}'] {
             let text = format!("a{sep}b");
+            let index = LineIndex::new(&text);
             let start = 1 + sep.len_utf8();
             let span = Span(start, start + 1); // "b"
             assert_eq!(
-                span.to_line_column(&text),
+                line_column(&index, span),
                 ((1, 0), (1, 1)),
                 "wrong position after {sep:?}"
             );
@@ -270,10 +350,35 @@ mod tests {
     #[test]
     fn test_line_column_multi_byte() {
         let text = "Hellö\n, Flöße";
+        let index = LineIndex::new(text);
         let span = Span(9, 16); // "Flöße"
-        println!("Span: {}", &text[9..16]);
-        let ((start_line, start_col), (end_line, end_col)) = span.to_line_column(text);
-        assert_eq!((start_line, start_col), (1, 2));
-        assert_eq!((end_line, end_col), (1, 7));
+        assert_eq!(line_column(&index, span), ((1, 2), (1, 7)));
+    }
+
+    #[test]
+    fn test_line_column_tab() {
+        // A tab is eight columns wide.
+        let index = LineIndex::new("a\tb");
+        assert_eq!(line_column(&index, Span(2, 3)), ((0, 9), (0, 10)));
+    }
+
+    #[test]
+    fn test_line_column_edges() {
+        let index = LineIndex::new("");
+        assert_eq!(index.line_count(), 1);
+        assert_eq!(line_column(&index, Span(0, 0)), ((0, 0), (0, 0)));
+        // Offsets past the end are clamped to the end of the text.
+        assert_eq!(index.line_pos(10).offset, 0);
+
+        let text = "ab\ncd\n";
+        let index = LineIndex::new(text);
+        // The empty last line exists, and the end of the text is on it.
+        assert_eq!(index.line_count(), 3);
+        assert_eq!(
+            line_column(&index, Span(text.len(), text.len())),
+            ((2, 0), (2, 0))
+        );
+        // A newline itself belongs to the line it terminates.
+        assert_eq!(line_column(&index, Span(2, 3)), ((0, 2), (1, 0)));
     }
 }

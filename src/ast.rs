@@ -1,16 +1,14 @@
 //! Structures that represent abstract syntax tree (AST) of the KDL document
 //!
-//! All of these types are parameterized by the `S` type which is a span type
-//! (perhaps implements [`Span`](crate::traits::Span). The idea is that most of
-//! the time spans are used for errors (either at parsing time, or at runtime),
-//! and original source is somewhere around to show in error snippets. So it's
-//! faster to only track byte offsets and calculate line number and column when
-//! printing code snippet. So use [`span::Span`](crate::traits::Span).
+//! All of these types carry a [`Span`](crate::span::Span), which only tracks
+//! byte offsets. The idea is that most of the time spans are used for errors
+//! (either at parsing time, or at runtime), and original source is somewhere
+//! around to show in error snippets. So it's faster to only track byte offsets
+//! and calculate line number and column when printing code snippet.
 //!
-//! But sometimes you will not have KDL source around, or performance of
-//! priting matters (i.e. you log source spans). In that case, span should
-//! contain line and column numbers for things, use
-//! [`LineSpan`](crate::span::LineSpan) for that.
+//! When you do need line and column numbers, build a
+//! [`LineIndex`](crate::span::LineIndex) of the source once and use it to
+//! convert spans into [`LineSpan`](crate::span::LineSpan)s.
 
 use std::collections::BTreeMap;
 use std::convert::Infallible;

@@ -14,6 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Changed
 
 - Changed the parser to use a single span type internally; the parse functions are no longer generic over the span type, but custom span types can still be obtained via conversion (#44)
+- Replaced `Span::to_line_column`, which rescanned the source from the start for every span, with `span::LineIndex`: `LineIndex::new(text)` indexes the line starts in a single pass and `LineIndex::line_span` then converts each span in logarithmic time. `LinePos` and `LineSpan` are available again, and a tab counts as eight columns as it did in 3.4.0
 - Migrated the parser from `chumsky` v0.9.3 to v0.13 (#45)
 
 ## [3.4.0] - 2026-06-21
