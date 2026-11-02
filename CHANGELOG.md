@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [3.4.1] - 2026-11-02
+
+### Fixed
+
+- Dropped dependency on the unmaintained `proc-macro-error2` crate (#57)
+
 ## [3.4.0] - 2026-06-21
 
 ### Added
@@ -35,7 +41,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 The beginning of time — this version is identical to [`knuffel` v3.2.0](https://crates.io/crates/knuffel/3.2.0).
 
-[unreleased]: https://github.com/TheLostLambda/knus/compare/v3.4.0...HEAD
+[unreleased]: https://github.com/TheLostLambda/knus/compare/v3.4.1...HEAD
+[3.4.0]: https://github.com/TheLostLambda/knus/compare/v3.4.0...v3.4.1
 [3.4.0]: https://github.com/TheLostLambda/knus/compare/v3.3.1...v3.4.0
 [3.3.1]: https://github.com/TheLostLambda/knus/compare/v3.2.0...v3.3.1
 [3.2.0]: https://github.com/TheLostLambda/knus/releases/tag/v3.2.0
